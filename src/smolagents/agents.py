@@ -14,6 +14,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Core agent implementations of smolagents: the abstract ReAct-style MultiStepAgent base class and its two
+#   concrete subclasses ToolCallingAgent (JSON/native tool calls) and CodeAgent (model writes Python code that
+#   is executed by a local or remote Python executor).
+# Exports: populate_template, ActionOutput, ToolOutput, the prompt TypedDicts (PlanningPromptTemplate,
+#   ManagedAgentPromptTemplate, FinalAnswerPromptTemplate, PromptTemplates), EMPTY_PROMPT_TEMPLATES, RunResult,
+#   the StreamEvent type alias, MultiStepAgent, ToolCallingAgent, CodeAgent, and AGENT_REGISTRY (class-name to
+#   class map used for safe deserialization in from_dict/from_folder).
+# Depends on: jinja2 (prompt templating), yaml (prompt files in smolagents.prompts), rich (console rendering),
+#   huggingface_hub (push/pull agents to Spaces), and smolagents modules memory, models, monitoring, tools,
+#   default_tools, local_python_executor, remote_executors, agent_types and utils.
+# Exceptions: none raised at import time beyond missing dependencies (ImportError).
+# Side effects: creates a module-level logger named after the module; no other import-time side effects.
 import importlib
 import json
 import os
@@ -100,6 +113,17 @@ logger = getLogger(__name__)
 
 
 def populate_template(template: str, variables: dict[str, Any]) -> str:
+    # [FUNCTION DOC]
+    # Renders a Jinja2 template string with the given variables, using StrictUndefined so that any referenced
+    #   but missing variable is an error.
+    # Inputs: template (str, Jinja2 source), variables (dict of name to value made available in the template).
+    # Outputs: the rendered string.
+    # Exceptions: raises a plain Exception whose message is "Error during jinja template rendering: <type>:
+    #   <msg>" for any rendering error (including undefined variables). Template syntax errors raised while
+    #   compiling (before the try block) propagate unwrapped as jinja2 TemplateSyntaxError.
+    # Side effects: none.
+    # KNOWN ISSUE: the wrapping Exception is raised without chaining to the original error and uses the
+    #   generic Exception type, which makes it hard to catch specifically.
     compiled_template = Template(template, undefined=StrictUndefined)
     try:
         return compiled_template.render(**variables)
@@ -109,12 +133,27 @@ def populate_template(template: str, variables: dict[str, Any]) -> str:
 
 @dataclass
 class ActionOutput:
+    # [CLASS DOC]
+    # Dataclass emitted at the end of every action step (by _step_stream) describing the step result.
+    # Inputs/attributes: output (Any, the value produced by the step, or None), is_final_answer (bool, True
+    #   when the output is the agent's final answer).
+    # Outputs: n/a (plain data container with generated init/repr/eq).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     output: Any
     is_final_answer: bool
 
 
 @dataclass
 class ToolOutput:
+    # [CLASS DOC]
+    # Dataclass describing the result of executing one tool call in ToolCallingAgent.
+    # Inputs/attributes: id (str, tool call id), output (Any, raw tool return value), is_final_answer (bool,
+    #   True if the tool was final_answer), observation (str, text shown to the model), tool_call (ToolCall, the
+    #   originating call).
+    # Outputs: n/a (plain data container).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     id: str
     output: Any
     is_final_answer: bool
@@ -123,6 +162,16 @@ class ToolOutput:
 
 
 class PlanningPromptTemplate(TypedDict):
+    # [CLASS DOC]
+    # TypedDict with the Jinja2 prompt strings used for planning steps.
+    # Inputs/attributes: initial_plan (str, prompt for the first plan; receives task, tools, managed_agents),
+    #   update_plan_pre_messages (str, system prompt preceding memory when re-planning; receives task),
+    #   update_plan_post_messages (str, user prompt following memory when re-planning; receives task, tools,
+    #   managed_agents, remaining_steps).
+    # Outputs: n/a (type definition only; instances are ordinary dicts).
+    # Exceptions: none raised directly.
+    # Side effects: none.
+    # KNOWN ISSUE: the docstring names the first key "plan" but the actual key is initial_plan.
     """
     Prompt templates for the planning step.
 
@@ -138,6 +187,13 @@ class PlanningPromptTemplate(TypedDict):
 
 
 class ManagedAgentPromptTemplate(TypedDict):
+    # [CLASS DOC]
+    # TypedDict with the Jinja2 prompts used when this agent is called as a managed agent by another agent.
+    # Inputs/attributes: task (str, wraps the incoming task; receives name and task), report (str, wraps the
+    #   final answer returned to the caller; receives name and final_answer).
+    # Outputs: n/a (type definition only).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Prompt templates for the managed agent.
 
@@ -151,6 +207,13 @@ class ManagedAgentPromptTemplate(TypedDict):
 
 
 class FinalAnswerPromptTemplate(TypedDict):
+    # [CLASS DOC]
+    # TypedDict with the prompts used to force a final answer when max steps are reached.
+    # Inputs/attributes: pre_messages (str, used verbatim as a system message, not templated), post_messages
+    #   (str, Jinja2 user prompt appended after memory; receives task).
+    # Outputs: n/a (type definition only).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Prompt templates for the final answer.
 
@@ -164,6 +227,14 @@ class FinalAnswerPromptTemplate(TypedDict):
 
 
 class PromptTemplates(TypedDict):
+    # [CLASS DOC]
+    # TypedDict grouping all prompt templates an agent needs.
+    # Inputs/attributes: system_prompt (str, Jinja2 system prompt), planning (PlanningPromptTemplate),
+    #   managed_agent (ManagedAgentPromptTemplate), final_answer (FinalAnswerPromptTemplate). Custom templates
+    #   passed to an agent must contain every key and sub-key present in EMPTY_PROMPT_TEMPLATES.
+    # Outputs: n/a (type definition only).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Prompt templates for the agent.
 
@@ -194,6 +265,17 @@ EMPTY_PROMPT_TEMPLATES = PromptTemplates(
 
 @dataclass
 class RunResult:
+    # [CLASS DOC]
+    # Dataclass holding extended information about one agent run, returned by MultiStepAgent.run when full
+    #   results are requested.
+    # Inputs/attributes: output (Any or None, final answer), state ("success" or "max_steps_error"), steps
+    #   (list of step dicts from memory), token_usage (TokenUsage or None if any step lacked usage), timing
+    #   (Timing of the run). A deprecated messages argument/property aliases steps.
+    # Outputs: n/a (data container; see dict for serialization).
+    # Exceptions: ValueError from the constructor when both messages and steps are given.
+    # Side effects: emits FutureWarning when the deprecated messages argument or property is used.
+    # KNOWN ISSUE: the custom init replaces the dataclass-generated one, so every field defaults to None even
+    #   though the type hints (e.g. state, timing) do not allow None; dict then fails if timing is None.
     """Holds extended information about an agent run.
 
     Attributes:
@@ -215,6 +297,14 @@ class RunResult:
     timing: Timing
 
     def __init__(self, output=None, state=None, steps=None, token_usage=None, timing=None, messages=None):
+        # [FUNCTION DOC]
+        # Initializes the run result, supporting the deprecated messages alias for steps.
+        # Inputs: output (Any, default None), state (str, default None), steps (list of dicts, default None),
+        #   token_usage (TokenUsage, default None), timing (Timing, default None), messages (deprecated alias
+        #   for steps, default None).
+        # Outputs: none (initializes attributes output, state, steps, token_usage, timing).
+        # Exceptions: ValueError if both messages and steps are provided.
+        # Side effects: emits a FutureWarning when messages is provided.
         # Handle deprecated 'messages' parameter
         if messages is not None:
             if steps is not None:
@@ -235,6 +325,12 @@ class RunResult:
 
     @property
     def messages(self):
+        # [FUNCTION DOC]
+        # Deprecated read-only property kept for backward compatibility.
+        # Inputs: none.
+        # Outputs: the steps list.
+        # Exceptions: none raised directly.
+        # Side effects: emits a FutureWarning on every access.
         """Backward compatibility property that returns steps."""
         warnings.warn(
             "Parameter 'messages' is deprecated and will be removed in version 1.25. Please use 'steps' instead.",
@@ -244,6 +340,13 @@ class RunResult:
         return self.steps
 
     def dict(self):
+        # [FUNCTION DOC]
+        # Serializes the run result to a plain dictionary.
+        # Inputs: none.
+        # Outputs: dict with keys output, state, steps, token_usage (its dict form or None) and timing (its
+        #   dict form).
+        # Exceptions: AttributeError if timing is None (timing is serialized unconditionally).
+        # Side effects: none.
         return {
             "output": self.output,
             "state": self.state,
@@ -266,6 +369,25 @@ StreamEvent: TypeAlias = Union[
 
 
 class MultiStepAgent(ABC):
+    # [CLASS DOC]
+    # Abstract base class for agents solving a task step by step with the ReAct loop: repeatedly generate an
+    #   action with the model, execute it, observe the result, optionally re-plan every planning_interval steps,
+    #   until a final answer is produced or max_steps is reached (then a final answer is forced from memory).
+    # Constructor args: tools (list of Tool), model (Model), prompt_templates (PromptTemplates or None,
+    #   defaults to empty templates; if given, must contain every key/sub-key), instructions (str, inserted in
+    #   system prompt), max_steps (int, default 20), add_base_tools (bool, default False), verbosity_level
+    #   (LogLevel, default INFO), managed_agents (list of agents with name and description), step_callbacks
+    #   (list of callables registered for ActionStep, or dict from step class to callable or list of callables),
+    #   planning_interval (int or None), name (str, must be a valid identifier), description (str),
+    #   provide_run_summary (bool), final_answer_checks (list of callables taking final answer, memory and agent
+    #   keyword), return_full_result (bool), logger (AgentLogger, created from verbosity_level if None).
+    # Key attributes: tools (dict name to tool, always containing final_answer), managed_agents (dict name to
+    #   agent), memory (AgentMemory), monitor (Monitor), step_callbacks (CallbackRegistry), state (dict of
+    #   variables shared with tools/executor), step_number, task, stream_outputs, interrupt_switch.
+    # Subclasses must implement initialize_system_prompt and _step_stream.
+    # Exceptions: AssertionError for missing prompt templates or invalid tools/managed agents, ValueError for
+    #   bad names, duplicate names or bad step_callbacks type.
+    # Side effects: mutates managed agents (sets their inputs and output_type); may instantiate base tools.
     """
     Agent class that solves the given task step by step, using the ReAct framework:
     While the objective is not reached, the agent will perform a cycle of action (given by the LLM) and observation (obtained from the environment).
@@ -310,6 +432,20 @@ class MultiStepAgent(ABC):
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
     ):
+        # [FUNCTION DOC]
+        # Builds the agent: validates prompt templates, stores settings, sets up managed agents, tools and
+        #   validates unique names, creates AgentMemory from the system prompt, the logger, the Monitor and step
+        #   callbacks.
+        # Inputs: see class doc (tools, model, prompt_templates, instructions, max_steps=20,
+        #   add_base_tools=False, verbosity_level=LogLevel.INFO, managed_agents=None, step_callbacks=None,
+        #   planning_interval=None, name=None, description=None, provide_run_summary=False,
+        #   final_answer_checks=None, return_full_result=False, logger=None).
+        # Outputs: none.
+        # Exceptions: AssertionError if prompt_templates lacks keys/sub-keys or tools/managed agents are
+        #   invalid; ValueError for invalid agent name, duplicate tool/agent names, or invalid step_callbacks
+        #   type; any error from initialize_system_prompt (template rendering) propagates.
+        # Side effects: mutates passed managed agents' inputs/output_type; sets stream_outputs to False.
+        # KNOWN ISSUE: validation relies on assert statements, which are skipped when Python runs with -O.
         self.agent_name = self.__class__.__name__
         self.model = model
         self.prompt_templates = prompt_templates or EMPTY_PROMPT_TEMPLATES
@@ -353,20 +489,47 @@ class MultiStepAgent(ABC):
 
     @property
     def system_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Property getter returning the current system prompt, rendered fresh on each access.
+        # Inputs: none.
+        # Outputs: the string returned by initialize_system_prompt.
+        # Exceptions: propagates template rendering errors.
+        # Side effects: none beyond those of initialize_system_prompt.
         return self.initialize_system_prompt()
 
     @system_prompt.setter
     def system_prompt(self, value: str):
+        # [FUNCTION DOC]
+        # Property setter that forbids assignment of system_prompt.
+        # Inputs: value (str, ignored).
+        # Outputs: none.
+        # Exceptions: always raises AttributeError telling the user to edit prompt_templates["system_prompt"]
+        #   instead.
+        # Side effects: none.
         raise AttributeError(
             """The 'system_prompt' property is read-only. Use 'self.prompt_templates["system_prompt"]' instead."""
         )
 
     def _validate_name(self, name: str | None) -> str | None:
+        # [FUNCTION DOC]
+        # HELPER: Validates the optional agent name.
+        # Inputs: name (str or None).
+        # Outputs: the same name (or None).
+        # Exceptions: ValueError if name is given and is not a valid Python identifier or is a reserved
+        #   keyword.
+        # Side effects: none.
         if name is not None and not is_valid_name(name):
             raise ValueError(f"Agent name '{name}' must be a valid Python identifier and not a reserved keyword.")
         return name
 
     def _setup_managed_agents(self, managed_agents: list | None = None) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Stores managed agents keyed by name and makes them callable like tools.
+        # Inputs: managed_agents (list of agents or None, default None).
+        # Outputs: none (sets self.managed_agents to a dict, empty if none given).
+        # Exceptions: AssertionError if any managed agent lacks a name or description.
+        # Side effects: sets on each managed agent an inputs schema (task: string; additional_args: nullable
+        #   object) and output_type "string".
         """Setup managed agents with proper logging."""
         self.managed_agents = {}
         if managed_agents:
@@ -387,6 +550,16 @@ class MultiStepAgent(ABC):
                 agent.output_type = "string"
 
     def _setup_tools(self, tools, add_base_tools):
+        # [FUNCTION DOC]
+        # HELPER: Builds the tools dict keyed by tool name, optionally adding base tools, and always ensures a
+        #   final_answer tool exists.
+        # Inputs: tools (list of BaseTool), add_base_tools (bool): when true, instantiates every tool in
+        #   TOOL_MAPPING except python_interpreter, which is only added when the class name is exactly
+        #   ToolCallingAgent.
+        # Outputs: none (sets self.tools).
+        # Exceptions: AssertionError if any element is not a BaseTool.
+        # Side effects: instantiates tool classes. User-provided tools with the same name as base tools are
+        #   overwritten.
         assert all(isinstance(tool, BaseTool) for tool in tools), (
             "All elements must be instance of BaseTool (or a subclass)"
         )
@@ -402,6 +575,12 @@ class MultiStepAgent(ABC):
         self.tools.setdefault("final_answer", FinalAnswerTool())
 
     def _validate_tools_and_managed_agents(self, tools, managed_agents):
+        # [FUNCTION DOC]
+        # HELPER: Ensures names of provided tools, managed agents and the agent itself are all unique.
+        # Inputs: tools (list of tools), managed_agents (list or None).
+        # Outputs: none.
+        # Exceptions: ValueError listing duplicated names.
+        # Side effects: none.
         tool_and_managed_agent_names = [tool.name for tool in tools]
         if managed_agents is not None:
             tool_and_managed_agent_names += [agent.name for agent in managed_agents]
@@ -414,6 +593,14 @@ class MultiStepAgent(ABC):
             )
 
     def _setup_step_callbacks(self, step_callbacks):
+        # [FUNCTION DOC]
+        # HELPER: Creates the CallbackRegistry and registers user callbacks plus the monitor's update_metrics.
+        # Inputs: step_callbacks (list: each registered for ActionStep; dict: step class to callable or list
+        #   of callables; or None/empty).
+        # Outputs: none (sets self.step_callbacks).
+        # Exceptions: ValueError if a non-empty value is neither list nor dict.
+        # Side effects: always registers self.monitor.update_metrics for ActionStep (so monitor must already
+        #   exist).
         # Initialize step callbacks registry
         self.step_callbacks = CallbackRegistry()
         if step_callbacks:
@@ -443,6 +630,23 @@ class MultiStepAgent(ABC):
         max_steps: int | None = None,
         return_full_result: bool | None = None,
     ) -> Any | RunResult:
+        # [FUNCTION DOC]
+        # Runs the agent on a task, either returning the final result or a generator of streamed events.
+        # Inputs: task (str), stream (bool, default False), reset (bool, default True: clear memory and
+        #   monitor), images (list of PIL images or None), additional_args (dict or None: merged into self.state
+        #   and described at the end of the task text), max_steps (int or None: falls back to self.max_steps),
+        #   return_full_result (bool or None: falls back to self.return_full_result).
+        # Outputs: if stream, the _run_stream generator (yielding stream deltas, tool calls, tool outputs,
+        #   action outputs, planning/action steps and finally a FinalAnswerStep). Otherwise the final answer
+        #   output, or a RunResult (output, aggregated token usage or None if any step lacked usage, step dicts,
+        #   timing, and state "max_steps_error" if the last step's error is AgentMaxStepsError else "success").
+        # Exceptions: AgentGenerationError and other errors from _run_stream propagate (non-generation
+        #   AgentErrors are recorded in steps instead); AgentError if interrupted; AssertionError if the last
+        #   step is not a FinalAnswerStep.
+        # Side effects: sets self.task and interrupt_switch, updates state, refreshes memory.system_prompt,
+        #   appends a TaskStep, logs the task, sends state and tools to the python executor if present.
+        # KNOWN ISSUE: max_steps uses a truthiness fallback so 0 is treated as unset; return_full_result is
+        #   ignored when stream is true.
         """
         Run the agent for the given task.
 
@@ -540,6 +744,22 @@ You have been provided with these additional arguments, that you can access dire
     def _run_stream(
         self, task: str, max_steps: int, images: list["PIL.Image.Image"] | None = None
     ) -> Generator[ActionStep | PlanningStep | FinalAnswerStep | ChatMessageStreamDelta]:
+        # [FUNCTION DOC]
+        # HELPER: Generator implementing the main ReAct loop.
+        # Inputs: task (str), max_steps (int), images (list of PIL images or None, attached to each
+        #   ActionStep).
+        # Outputs (yields): for scheduled planning steps (step 1 and every planning_interval steps), the
+        #   planning stream events and the PlanningStep; for each action step, every event from _step_stream
+        #   then the ActionStep; if max steps are exhausted, the last action step again; finally a
+        #   FinalAnswerStep wrapping the output-type-converted final answer.
+        # Exceptions: AgentError if interrupt_switch is set; AgentGenerationError re-raised; AgentError from
+        #   final answer checks is caught as a step error; other AgentErrors are stored on the step and the loop
+        #   continues; non-agent exceptions propagate.
+        # Side effects: resets step_number to 1 and increments it; appends planning/action steps to memory;
+        #   runs step callbacks; logs final answer.
+        # KNOWN ISSUE: when max steps is reached it yields the previous action_step a second time (not the
+        #   max-steps step); and if max_steps is below 1 the loop never runs, so action_step and final_answer
+        #   are undefined (UnboundLocalError).
         self.step_number = 1
         returned_final_answer = False
         while not returned_final_answer and self.step_number <= max_steps:
@@ -611,6 +831,12 @@ You have been provided with these additional arguments, that you can access dire
         yield final_answer_step
 
     def _validate_final_answer(self, final_answer: Any):
+        # [FUNCTION DOC]
+        # HELPER: Runs every final_answer_checks function on a candidate final answer.
+        # Inputs: final_answer (Any).
+        # Outputs: none.
+        # Exceptions: AgentError naming the failed check if a check returns a falsy value or raises.
+        # Side effects: whatever the check functions do.
         for check_function in self.final_answer_checks:
             try:
                 assert check_function(final_answer, self.memory, agent=self)
@@ -618,11 +844,24 @@ You have been provided with these additional arguments, that you can access dire
                 raise AgentError(f"Check {check_function.__name__} failed with error: {e}", self.logger)
 
     def _finalize_step(self, memory_step: ActionStep | PlanningStep | FinalAnswerStep):
+        # [FUNCTION DOC]
+        # HELPER: Closes a memory step and runs registered callbacks for its type.
+        # Inputs: memory_step (ActionStep, PlanningStep or FinalAnswerStep).
+        # Outputs: none.
+        # Exceptions: propagates callback errors.
+        # Side effects: sets timing.end_time to now for non-final steps; invokes callbacks with agent=self.
         if not isinstance(memory_step, FinalAnswerStep):
             memory_step.timing.end_time = time.time()
         self.step_callbacks.callback(memory_step, agent=self)
 
     def _handle_max_steps_reached(self, task: str) -> Any:
+        # [FUNCTION DOC]
+        # HELPER: Produces a forced final answer after max steps and records it as an ActionStep with an
+        #   AgentMaxStepsError.
+        # Inputs: task (str).
+        # Outputs: the content of the model's final answer message.
+        # Exceptions: none raised directly (provide_final_answer swallows model errors).
+        # Side effects: calls the model, appends the step to memory, runs callbacks.
         action_step_start_time = time.time()
         final_answer = self.provide_final_answer(task)
         final_memory_step = ActionStep(
@@ -639,6 +878,19 @@ You have been provided with these additional arguments, that you can access dire
     def _generate_planning_step(
         self, task, is_first_step: bool, step: int
     ) -> Generator[ChatMessageStreamDelta | PlanningStep]:
+        # [FUNCTION DOC]
+        # HELPER: Generator producing an initial or updated plan with the model.
+        # Inputs: task (str), is_first_step (bool: use initial_plan template on a single user message;
+        #   otherwise use summary-mode memory between update_plan_pre_messages system and
+        #   update_plan_post_messages user messages), step (int, current step number used to compute
+        #   remaining_steps).
+        # Outputs (yields): stream deltas when streaming is enabled and the model supports it, then one
+        #   PlanningStep with input messages, wrapped plan text, model output message, token usage and timing.
+        #   Generation stops at "<end_plan>".
+        # Exceptions: propagates model and template errors.
+        # Side effects: calls the model, renders live markdown when streaming, logs the plan.
+        # KNOWN ISSUE: remaining_steps uses self.max_steps, ignoring a max_steps override passed to run; when
+        #   streaming, input tokens are overwritten per event while output tokens are summed.
         start_time = time.time()
         if is_first_step:
             input_messages = [
@@ -748,10 +1000,22 @@ You have been provided with these additional arguments, that you can access dire
 
     @abstractmethod
     def initialize_system_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Abstract method: subclasses return the rendered system prompt.
+        # Inputs: none.
+        # Outputs: system prompt string (base implementation returns None).
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """To be implemented in child classes"""
         ...
 
     def interrupt(self):
+        # [FUNCTION DOC]
+        # Requests interruption of a running agent; the loop raises AgentError at the start of the next step.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: sets interrupt_switch to True.
         """Interrupts the agent execution."""
         self.interrupt_switch = True
 
@@ -759,6 +1023,14 @@ You have been provided with these additional arguments, that you can access dire
         self,
         summary_mode: bool = False,
     ) -> list[ChatMessage]:
+        # [FUNCTION DOC]
+        # Converts the system prompt step and all memory steps into a flat list of chat messages for the
+        #   model.
+        # Inputs: summary_mode (bool, default False: passed to each step's to_messages, dropping e.g. system
+        #   prompt and plans).
+        # Outputs: list of ChatMessage.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """
         Reads past llm_outputs, actions, and observations or errors from the memory into a series of messages
         that can be used as input to the LLM. Adds a number of keywords (such as PLAN, error, etc) to help
@@ -772,6 +1044,15 @@ You have been provided with these additional arguments, that you can access dire
     def _step_stream(
         self, memory_step: ActionStep
     ) -> Generator[ChatMessageStreamDelta | ToolCall | ToolOutput | ActionOutput]:
+        # [FUNCTION DOC]
+        # Abstract-style hook performing one ReAct step; subclasses must override.
+        # Inputs: memory_step (ActionStep to fill).
+        # Outputs: generator expected to yield stream deltas, ToolCall, ToolOutput and finally an
+        #   ActionOutput.
+        # Exceptions: always raises NotImplementedError in the base class.
+        # Side effects: none.
+        # KNOWN ISSUE: docstring says it finally yields None or the final answer, but implementations yield an
+        #   ActionOutput.
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -780,6 +1061,14 @@ You have been provided with these additional arguments, that you can access dire
         raise NotImplementedError("This method should be implemented in child classes")
 
     def step(self, memory_step: ActionStep) -> Any:
+        # [FUNCTION DOC]
+        # Runs one step non-streaming by exhausting _step_stream.
+        # Inputs: memory_step (ActionStep).
+        # Outputs: the last yielded element (in practice an ActionOutput).
+        # Exceptions: propagates errors from _step_stream; IndexError if it yields nothing.
+        # Side effects: those of _step_stream.
+        # KNOWN ISSUE: docstring says it returns None or the final answer, but it returns the ActionOutput
+        #   object.
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Returns either None if the step is not final, or the final answer.
@@ -787,6 +1076,12 @@ You have been provided with these additional arguments, that you can access dire
         return list(self._step_stream(memory_step))[-1]
 
     def extract_action(self, model_output: str, split_token: str) -> tuple[str, str]:
+        # [FUNCTION DOC]
+        # Splits model output into rationale and action using the last two segments around split_token.
+        # Inputs: model_output (str), split_token (str).
+        # Outputs: tuple (rationale stripped, action stripped).
+        # Exceptions: AgentParsingError if the token is absent (indexing fails).
+        # Side effects: none.
         """
         Parse action from the LLM output
 
@@ -808,6 +1103,15 @@ You have been provided with these additional arguments, that you can access dire
         return rationale.strip(), action.strip()
 
     def provide_final_answer(self, task: str) -> ChatMessage:
+        # [FUNCTION DOC]
+        # Asks the model for a final answer from the whole memory (used when max steps are reached).
+        # Inputs: task (str).
+        # Outputs: the model's ChatMessage; on any model error, an assistant ChatMessage containing the error
+        #   text.
+        # Exceptions: none from the model call (swallowed); template rendering errors propagate.
+        # Side effects: calls the model.
+        # KNOWN ISSUE: docstring documents an images argument that does not exist and a str return, but a
+        #   ChatMessage is returned.
         """
         Provide the final answer to the task, based on the logs of the agent's interactions.
 
@@ -853,10 +1157,21 @@ You have been provided with these additional arguments, that you can access dire
             )
 
     def visualize(self):
+        # [FUNCTION DOC]
+        # Prints a rich tree of the agent, its tools and managed agents.
+        # Inputs: none. Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: console output through the logger.
         """Creates a rich tree visualization of the agent's structure."""
         self.logger.visualize_agent_tree(self)
 
     def replay(self, detailed: bool = False):
+        # [FUNCTION DOC]
+        # Prints a replay of the agent's memory steps.
+        # Inputs: detailed (bool, default False: also show memory at each step).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: console output through the logger.
         """Prints a pretty replay of the agent's steps.
 
         Args:
@@ -866,6 +1181,14 @@ You have been provided with these additional arguments, that you can access dire
         self.memory.replay(self.logger, detailed=detailed)
 
     def __call__(self, task: str, **kwargs):
+        # [FUNCTION DOC]
+        # Entry point used when this agent is invoked as a managed agent: wraps the task with the
+        #   managed_agent task template, runs it, and wraps the result with the report template.
+        # Inputs: task (str), kwargs (forwarded to run, e.g. additional_args).
+        # Outputs: report string; if provide_run_summary, followed by a summary_of_work section with truncated
+        #   summary-mode memory messages.
+        # Exceptions: propagates errors from run and template rendering.
+        # Side effects: runs the agent (memory reset, model calls, logging).
         """Adds additional prompting for the managed agent, runs it, and wraps the output.
         This method is called only by a managed agent.
         """
@@ -890,6 +1213,17 @@ You have been provided with these additional arguments, that you can access dire
         return answer
 
     def save(self, output_dir: str | Path, relative_path: str | None = None):
+        # [FUNCTION DOC]
+        # Writes the agent to a folder: __init__.py, tools/<name>.py for each tool, managed_agents/<name>/
+        #   recursively, prompts.yaml, agent.json (to_dict with tools as names and managed_agents as name to
+        #   class map), requirements.txt and a Gradio app.py.
+        # Inputs: output_dir (str or Path), relative_path (str or None: dotted import prefix used for nested
+        #   managed agents).
+        # Outputs: none.
+        # Exceptions: propagates I/O and serialization errors.
+        # Side effects: creates directories and files on disk; may log about ignored callbacks.
+        # KNOWN ISSUE: docstring mentions prompt.yaml but the file written is prompts.yaml; relative_path
+        #   undocumented.
         """
         Saves the relevant code files for your agent. This will copy the code of your agent in `output_dir` as well as autogenerate:
 
@@ -968,6 +1302,17 @@ You have been provided with these additional arguments, that you can access dire
             f.write(app_text + "\n")  # Append newline at the end
 
     def to_dict(self) -> dict[str, Any]:
+        # [FUNCTION DOC]
+        # Serializes the agent configuration to a dict.
+        # Inputs: none.
+        # Outputs: dict with class, tools (tool dicts), model (class and data), managed_agents (their dicts),
+        #   prompt_templates, max_steps, verbosity_level (int), planning_interval, name, description and sorted
+        #   requirements (tool and managed agent requirements plus top-level packages of non-builtin authorized
+        #   imports).
+        # Exceptions: propagates errors from tool/model to_dict.
+        # Side effects: logs that step_callbacks/final_answer_checks are ignored when set.
+        # KNOWN ISSUE: step_callbacks is always a non-empty registry, so that message is always logged;
+        #   instructions, return_full_result and provide_run_summary are not serialized.
         """Convert the agent to a dictionary representation.
 
         Returns:
@@ -1009,6 +1354,14 @@ You have been provided with these additional arguments, that you can access dire
 
     @classmethod
     def from_dict(cls, agent_dict: dict[str, Any], **kwargs) -> "MultiStepAgent":
+        # [FUNCTION DOC]
+        # Classmethod rebuilding an agent from to_dict output.
+        # Inputs: agent_dict (dict), kwargs (override constructor args; also forwarded to managed agents'
+        #   from_dict).
+        # Outputs: a new instance of cls.
+        # Exceptions: ValueError for model or managed agent classes not in MODEL_REGISTRY/AGENT_REGISTRY;
+        #   KeyError if required keys are missing.
+        # Side effects: executes tool source code via Tool.from_code.
         """Create agent from a dictionary representation.
 
         Args:
@@ -1069,6 +1422,14 @@ You have been provided with these additional arguments, that you can access dire
         trust_remote_code: bool = False,
         **kwargs,
     ):
+        # [FUNCTION DOC]
+        # Classmethod downloading an agent Space from the Hugging Face Hub and loading it with from_folder.
+        # Inputs: repo_id (str), token (str or None), trust_remote_code (bool, default False), kwargs
+        #   (cache_dir, force_download, proxies, revision, local_files_only go to snapshot_download; the rest to
+        #   from_folder).
+        # Outputs: the loaded agent.
+        # Exceptions: ValueError if trust_remote_code is false; network/hub errors propagate.
+        # Side effects: network download to the local cache; executes downloaded tool code.
         """
         Loads an agent defined on the Hub.
 
@@ -1117,6 +1478,13 @@ You have been provided with these additional arguments, that you can access dire
 
     @classmethod
     def from_folder(cls, folder: str | Path, **kwargs):
+        # [FUNCTION DOC]
+        # Classmethod loading an agent saved by save: reads agent.json, renames legacy HfApiModel to
+        #   InferenceClientModel, recursively loads managed agents, reads tool sources, then calls from_dict.
+        # Inputs: folder (str or Path), kwargs (passed to from_dict, not to managed agents).
+        # Outputs: the loaded agent.
+        # Exceptions: ValueError for unknown managed agent class; file and JSON errors propagate.
+        # Side effects: reads files; logs a warning for HfApiModel; executes tool code.
         """Loads an agent from a local folder.
 
         Args:
@@ -1165,6 +1533,14 @@ You have been provided with these additional arguments, that you can access dire
         token: bool | str | None = None,
         create_pr: bool = False,
     ) -> str:
+        # [FUNCTION DOC]
+        # Uploads the agent as a Gradio Space on the Hub.
+        # Inputs: repo_id (str), commit_message (str, default "Upload agent"), private (bool or None), token
+        #   (bool, str or None), create_pr (bool, default False).
+        # Outputs: the result of upload_folder (commit info / URL).
+        # Exceptions: hub/network errors propagate.
+        # Side effects: creates the Space if needed, sets tags smolagents and agent, saves to a temp dir and
+        #   uploads it.
         """
         Upload the agent to the Hub.
 
@@ -1213,6 +1589,15 @@ You have been provided with these additional arguments, that you can access dire
 
 
 class ToolCallingAgent(MultiStepAgent):
+    # [CLASS DOC]
+    # Agent whose actions are native/JSON tool calls produced by the model; multiple calls in one step run in
+    #   parallel threads.
+    # Constructor args: tools, model, prompt_templates (defaults to prompts/toolcalling_agent.yaml),
+    #   planning_interval, stream_outputs (bool, default False), max_tool_threads (int or None), kwargs passed
+    #   to MultiStepAgent.
+    # Key attributes: stream_outputs, max_tool_threads, tools_and_managed_agents.
+    # Exceptions: ValueError if stream_outputs is set but the model lacks generate_stream.
+    # Side effects: reads the packaged YAML prompt file.
     """
     This agent uses JSON-like tool calls, using method `model.get_tool_call` to leverage the LLM engine's tool calling capabilities.
 
@@ -1238,6 +1623,15 @@ class ToolCallingAgent(MultiStepAgent):
         max_tool_threads: int | None = None,
         **kwargs,
     ):
+        # [FUNCTION DOC]
+        # Loads default prompts if none given, initializes the base agent, and configures streaming and
+        #   threading.
+        # Inputs: tools (list of Tool), model (Model), prompt_templates (default None), planning_interval
+        #   (default None), stream_outputs (bool, default False), max_tool_threads (int or None), kwargs (base
+        #   class args).
+        # Outputs: none.
+        # Exceptions: ValueError if streaming requested without generate_stream; base class exceptions.
+        # Side effects: reads prompts YAML from package resources.
         prompt_templates = prompt_templates or yaml.safe_load(
             importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
         )
@@ -1259,10 +1653,21 @@ class ToolCallingAgent(MultiStepAgent):
 
     @property
     def tools_and_managed_agents(self):
+        # [FUNCTION DOC]
+        # Property returning tools followed by managed agents as a list (passed to the model as callable
+        #   tools).
+        # Inputs: none. Outputs: list.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """Returns a combined list of tools and managed agents."""
         return list(self.tools.values()) + list(self.managed_agents.values())
 
     def initialize_system_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Renders the system prompt template with tools, managed_agents and custom_instructions.
+        # Inputs: none. Outputs: rendered string.
+        # Exceptions: template rendering Exception propagates.
+        # Side effects: none.
         system_prompt = populate_template(
             self.prompt_templates["system_prompt"],
             variables={
@@ -1276,6 +1681,19 @@ class ToolCallingAgent(MultiStepAgent):
     def _step_stream(
         self, memory_step: ActionStep
     ) -> Generator[ChatMessageStreamDelta | ToolCall | ToolOutput | ActionOutput]:
+        # [FUNCTION DOC]
+        # HELPER: One ReAct step: send memory to the model with tools (stop sequences "Observation:", "Calling
+        #   tools:"), stream or generate the reply, parse tool calls (from text if none native, else JSON-decode
+        #   arguments), run them via process_tool_calls, and yield the results.
+        # Inputs: memory_step (ActionStep, filled with input messages, model output, token usage, tool calls,
+        #   observations).
+        # Outputs (yields): stream deltas (if streaming), ToolCall and ToolOutput events, then an ActionOutput
+        #   whose output is the final answer (resolved from state if it names a state key) or None.
+        # Exceptions: AgentGenerationError for model errors; AgentParsingError for tool call parsing errors;
+        #   AgentExecutionError if final_answer is combined with other calls; AgentToolExecutionError for
+        #   multiple final answers; tool errors from execute_tool_call.
+        # Side effects: model call, live console rendering, logging, memory step mutation.
+        # KNOWN ISSUE: docstring says it yields None or the final answer, but it yields an ActionOutput.
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -1361,6 +1779,16 @@ class ToolCallingAgent(MultiStepAgent):
     def process_tool_calls(
         self, chat_message: ChatMessage, memory_step: ActionStep
     ) -> Generator[ToolCall | ToolOutput]:
+        # [FUNCTION DOC]
+        # Converts model tool calls to ToolCall objects, executes them (directly for one call, in a
+        #   ThreadPoolExecutor with copied context for several), and records results on the memory step.
+        # Inputs: chat_message (ChatMessage with tool_calls), memory_step (ActionStep).
+        # Outputs (yields): each ToolCall first, then each ToolOutput as it completes.
+        # Exceptions: AssertionError if tool_calls is None; tool execution errors propagate.
+        # Side effects: logging; image/audio results stored in self.state; sets memory_step.tool_calls and
+        #   appends observations joined by newlines.
+        # KNOWN ISSUE: tool calls and observations are ordered by sorting call ids as strings, not by model
+        #   order.
         """Process tool calls from the model output and update agent memory.
 
         Args:
@@ -1381,6 +1809,14 @@ class ToolCallingAgent(MultiStepAgent):
 
         # Helper function to process a single tool call
         def process_single_tool_call(tool_call: ToolCall) -> ToolOutput:
+            # [FUNCTION DOC]
+            # HELPER: Executes one ToolCall and builds its ToolOutput.
+            # Inputs: tool_call (ToolCall; missing arguments treated as an empty dict).
+            # Outputs: ToolOutput; AgentImage/AgentAudio results are stored in state as image.png/audio.mp3
+            #   and the observation says so, otherwise the observation is the stripped string of the result.
+            # Exceptions: propagates errors from execute_tool_call.
+            # Side effects: logs the call and observations; mutates self.state for image/audio results (same
+            #   key reused, so earlier results are overwritten).
             tool_name = tool_call.name
             tool_arguments = tool_call.arguments or {}
             self.logger.log(
@@ -1442,6 +1878,12 @@ class ToolCallingAgent(MultiStepAgent):
         )
 
     def _substitute_state_variables(self, arguments: dict[str, str] | str) -> dict[str, Any] | str:
+        # [FUNCTION DOC]
+        # HELPER: Replaces string argument values that match a state key with the stored state value.
+        # Inputs: arguments (dict or str).
+        # Outputs: new dict with substitutions, or the string unchanged.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """Replace string values in arguments with their corresponding state values if they exist."""
         if isinstance(arguments, dict):
             return {
@@ -1451,6 +1893,15 @@ class ToolCallingAgent(MultiStepAgent):
         return arguments
 
     def execute_tool_call(self, tool_name: str, arguments: dict[str, str] | str) -> Any:
+        # [FUNCTION DOC]
+        # Looks up a tool or managed agent by name, substitutes state variables, validates arguments and calls
+        #   it (tools with sanitize_inputs_outputs enabled; dict arguments are passed as keywords, otherwise
+        #   positionally).
+        # Inputs: tool_name (str), arguments (dict or str).
+        # Outputs: the tool's return value.
+        # Exceptions: AgentToolExecutionError for unknown tool, unexpected validation errors or execution
+        #   failures; AgentToolCallError for ValueError/TypeError during argument validation.
+        # Side effects: those of the tool or managed agent run.
         """
         Execute a tool or managed agent with the provided arguments.
 
@@ -1503,6 +1954,22 @@ class ToolCallingAgent(MultiStepAgent):
 
 
 class CodeAgent(MultiStepAgent):
+    # [CLASS DOC]
+    # Agent whose actions are Python code blobs written by the model, extracted and run by a Python executor
+    #   (local sandboxed interpreter or a remote blaxel/e2b/modal/docker executor).
+    # Constructor args: tools, model, prompt_templates (defaults to code_agent.yaml, or
+    #   structured_code_agent.yaml when use_structured_outputs_internally), additional_authorized_imports (list
+    #   of str, "*" allows all), planning_interval, executor (PythonExecutor or None), executor_type (default
+    #   "local"), executor_kwargs, max_print_outputs_length, stream_outputs (bool),
+    #   use_structured_outputs_internally (bool), code_block_tags (tuple of opening/closing tags, "markdown", or
+    #   None for <code>/</code>), kwargs for MultiStepAgent.
+    # Key attributes: authorized_imports (sorted base builtins plus additional), code_block_tags,
+    #   python_executor, executor_type, executor_kwargs. Usable as a context manager that cleans up the
+    #   executor.
+    # Exceptions: ValueError for unsupported code_block_tags string or streaming without generate_stream.
+    # Side effects: creates an executor (possibly remote resources); logs a caution when all imports allowed.
+    # KNOWN ISSUE: the docstring says "markdown" maps to a regex opening tag for python or py with a newline-
+    #   prefixed closing tag, but code uses the literal pair of a python-tagged fence and a plain fence.
     """
     In this agent, the tool calls will be formulated by the LLM in code format, then parsed and executed.
 
@@ -1540,6 +2007,16 @@ class CodeAgent(MultiStepAgent):
         code_block_tags: str | tuple[str, str] | None = None,
         **kwargs,
     ):
+        # [FUNCTION DOC]
+        # Configures imports, prompts, code block tags, base agent, streaming and the Python executor.
+        # Inputs: see class doc (tools, model, prompt_templates=None, additional_authorized_imports=None,
+        #   planning_interval=None, executor=None, executor_type="local", executor_kwargs=None,
+        #   max_print_outputs_length=None, stream_outputs=False, use_structured_outputs_internally=False,
+        #   code_block_tags=None, kwargs).
+        # Outputs: none.
+        # Exceptions: ValueError for bad code_block_tags or streaming unsupported; errors from
+        #   create_python_executor and the base constructor.
+        # Side effects: reads prompt YAML, logs, creates executor.
         self.additional_authorized_imports = additional_authorized_imports if additional_authorized_imports else []
         self.authorized_imports = sorted(set(BASE_BUILTIN_MODULES) | set(self.additional_authorized_imports))
         self.max_print_outputs_length = max_print_outputs_length
@@ -1585,17 +2062,39 @@ class CodeAgent(MultiStepAgent):
         self.python_executor = executor or self.create_python_executor()
 
     def __enter__(self):
+        # [FUNCTION DOC]
+        # Context manager entry.
+        # Inputs: none. Outputs: self.
+        # Exceptions: none raised directly. Side effects: none.
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # [FUNCTION DOC]
+        # Context manager exit; calls cleanup and does not suppress exceptions.
+        # Inputs: exc_type, exc_value, traceback (ignored). Outputs: None.
+        # Exceptions: propagates cleanup errors. Side effects: releases executor resources.
         self.cleanup()
 
     def cleanup(self):
+        # [FUNCTION DOC]
+        # Calls the executor's cleanup method if it has one.
+        # Inputs: none. Outputs: none.
+        # Exceptions: propagates executor errors.
+        # Side effects: may shut down remote sandboxes/containers.
         """Clean up resources used by the agent, such as the remote Python executor."""
         if hasattr(self.python_executor, "cleanup"):
             self.python_executor.cleanup()
 
     def create_python_executor(self) -> PythonExecutor:
+        # [FUNCTION DOC]
+        # Creates the executor for executor_type: LocalPythonExecutor (with additional imports and
+        #   max_print_outputs_length merged with executor_kwargs) or the matching remote executor class (with
+        #   additional imports, logger and executor_kwargs).
+        # Inputs: none (uses instance attributes).
+        # Outputs: a PythonExecutor.
+        # Exceptions: ValueError for unsupported type; generic Exception if managed agents are combined with a
+        #   remote executor; executor construction errors.
+        # Side effects: may start remote sandboxes or containers.
         if self.executor_type not in {"local", "blaxel", "e2b", "modal", "docker"}:
             raise ValueError(f"Unsupported executor type: {self.executor_type}")
 
@@ -1618,6 +2117,12 @@ class CodeAgent(MultiStepAgent):
             )
 
     def initialize_system_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Renders the system prompt with tools, managed_agents, authorized_imports (a sentence if "*" is
+        #   allowed, else the list as a string), custom_instructions and the code block opening/closing tags.
+        # Inputs: none. Outputs: rendered string.
+        # Exceptions: template rendering Exception propagates.
+        # Side effects: none.
         system_prompt = populate_template(
             self.prompt_templates["system_prompt"],
             variables={
@@ -1638,6 +2143,20 @@ class CodeAgent(MultiStepAgent):
     def _step_stream(
         self, memory_step: ActionStep
     ) -> Generator[ChatMessageStreamDelta | ToolCall | ToolOutput | ActionOutput]:
+        # [FUNCTION DOC]
+        # HELPER: One ReAct step: query the model (stop sequences "Observation:", "Calling tools:" and the
+        #   closing code tag when not contained in the opening tag; JSON response format if structured outputs),
+        #   ensure the output ends with the closing tag, extract the code (JSON "code" field or code blob
+        #   parsing), fix final_answer usage, execute it, and record logs/output as observations.
+        # Inputs: memory_step (ActionStep; filled with input messages, model output, token usage, code_action,
+        #   tool_calls, observations, action_output).
+        # Outputs (yields): stream deltas (if streaming), a python_interpreter ToolCall, then an ActionOutput
+        #   with the execution output and is_final_answer flag.
+        # Exceptions: AgentGenerationError for model errors; AgentParsingError for code extraction failures;
+        #   AgentExecutionError for execution failures (after logging any captured print output and an
+        #   unauthorized import hint).
+        # Side effects: model call, code execution (may have arbitrary effects), logging and live rendering.
+        # KNOWN ISSUE: docstring says it yields None or the final answer, but it yields an ActionOutput.
         """
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         Yields ChatMessageStreamDelta during the run if streaming is enabled.
@@ -1764,6 +2283,13 @@ class CodeAgent(MultiStepAgent):
         yield ActionOutput(output=code_output.output, is_final_answer=code_output.is_final_answer)
 
     def to_dict(self) -> dict[str, Any]:
+        # [FUNCTION DOC]
+        # Extends the base dict with authorized_imports, executor_type, executor_kwargs and
+        #   max_print_outputs_length.
+        # Inputs: none. Outputs: dict.
+        # Exceptions: as base to_dict. Side effects: as base to_dict.
+        # KNOWN ISSUE: code_block_tags and use_structured_outputs_internally are not serialized, although
+        #   from_dict reads code_block_tags.
         """Convert the agent to a dictionary representation.
 
         Returns:
@@ -1778,6 +2304,16 @@ class CodeAgent(MultiStepAgent):
 
     @classmethod
     def from_dict(cls, agent_dict: dict[str, Any], **kwargs) -> "CodeAgent":
+        # [FUNCTION DOC]
+        # Classmethod rebuilding a CodeAgent: maps authorized_imports to additional_authorized_imports and
+        #   forwards executor_type, executor_kwargs, max_print_outputs_length and code_block_tags (non-None
+        #   ones), then delegates to MultiStepAgent.from_dict with user kwargs taking precedence.
+        # Inputs: agent_dict (dict), kwargs (overrides).
+        # Outputs: a CodeAgent instance.
+        # Exceptions: as MultiStepAgent.from_dict.
+        # Side effects: as MultiStepAgent.from_dict.
+        # KNOWN ISSUE: the CodeAgent-specific kwargs are also forwarded to managed agents' from_dict, which
+        #   may be ToolCallingAgents that do not accept them.
         """Create CodeAgent from a dictionary representation.
 
         Args:
