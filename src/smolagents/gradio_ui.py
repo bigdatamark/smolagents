@@ -13,6 +13,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Purpose: Gradio integration: converts agent memory steps and streaming deltas into gradio ChatMessage
+#   objects, streams agent runs, and provides the GradioUI chat application with optional file uploads.
+# Exports: stream_to_gradio, GradioUI (public); also pull_messages_from_step, get_step_footnote_content and
+#   private formatting helpers.
+# Dependencies: smolagents agent_types, agents, memory, models; gradio is imported lazily and checked via
+#   _is_package_available.
+# Side effects: none at import.
 import os
 import re
 import shutil
@@ -27,6 +35,13 @@ from smolagents.utils import _is_package_available
 
 
 def get_step_footnote_content(step_log: ActionStep | PlanningStep, step_name: str) -> str:
+    # [FUNCTION DOC]
+    # Builds a small grey HTML span footnote: bold step name, then input/output token counts (thousands
+    #   separators) if token usage exists, then duration rounded to 2 decimals if non-zero.
+    # Inputs: step_log (ActionStep or PlanningStep), step_name (str).
+    # Outputs: str (HTML).
+    # Exceptions: AttributeError if the step lacks timing/token_usage.
+    # Side effects: none.
     """Get a footnote string for a step log with duration and token information"""
     step_footnote = f"**{step_name}**"
     if step_log.token_usage is not None:
@@ -37,6 +52,13 @@ def get_step_footnote_content(step_log: ActionStep | PlanningStep, step_name: st
 
 
 def _clean_model_output(model_output: str) -> str:
+    # [FUNCTION DOC]
+    # HELPER: Strips whitespace and removes "<end_code>" tags adjacent to triple backticks in the three common
+    #   layouts, leaving the backticks.
+    # Inputs: model_output (str).
+    # Outputs: cleaned str (empty if input is falsy).
+    # Exceptions: TypeError if a non-string is passed.
+    # Side effects: none.
     """
     Clean up model output by removing trailing tags and extra backticks.
 
@@ -57,6 +79,15 @@ def _clean_model_output(model_output: str) -> str:
 
 
 def _format_code_content(content: str) -> str:
+    # [FUNCTION DOC]
+    # HELPER: Removes any opening code fences (a triple backtick plus the rest of its line) and "<end_code>"
+    #   tags, then wraps the result in a python code fence.
+    # Inputs: content (str).
+    # Outputs: str fenced as python code.
+    # Exceptions: none raised directly.
+    # Side effects: none.
+    # KNOWN ISSUE: a closing fence without a trailing newline is not removed, and the final check for an
+    #   existing python fence is almost never true after the stripping.
     """
     Format code content as Python code block if it's not already formatted.
 
@@ -78,6 +109,17 @@ def _format_code_content(content: str) -> str:
 
 
 def _process_action_step(step_log: ActionStep, skip_model_outputs: bool = False) -> Generator:
+    # [FUNCTION DOC]
+    # HELPER: Generator turning an ActionStep into gradio messages: step number header and cleaned model
+    #   output (unless skipped), a "Used tool" message for the first tool call (dict arguments use their
+    #   "answer" entry or the whole dict; python_interpreter content is code-fenced), execution logs, one
+    #   message per observation image (saved via AgentImage), error, footnote and a "-----" separator.
+    # Inputs: step_log (ActionStep), skip_model_outputs (bool, default False).
+    # Outputs: yields gradio ChatMessage objects.
+    # Exceptions: ImportError if gradio is missing.
+    # Side effects: observation images are written to temp files.
+    # KNOWN ISSUE: only the first tool call is shown; the execution-logs code fence is opened but never
+    #   closed.
     """
     Process an [`ActionStep`] and yield appropriate Gradio ChatMessage objects.
 
@@ -164,6 +206,13 @@ def _process_action_step(step_log: ActionStep, skip_model_outputs: bool = False)
 
 
 def _process_planning_step(step_log: PlanningStep, skip_model_outputs: bool = False) -> Generator:
+    # [FUNCTION DOC]
+    # HELPER: Generator turning a PlanningStep into gradio messages: "Planning step" header and plan text
+    #   (unless skipped), then footnote and separator.
+    # Inputs: step_log (PlanningStep), skip_model_outputs (bool, default False).
+    # Outputs: yields gradio ChatMessage objects (2 or 4).
+    # Exceptions: ImportError if gradio is missing.
+    # Side effects: none.
     """
     Process a [`PlanningStep`] and yield appropriate gradio.ChatMessage objects.
 
@@ -187,6 +236,14 @@ def _process_planning_step(step_log: PlanningStep, skip_model_outputs: bool = Fa
 
 
 def _process_final_answer_step(step_log: FinalAnswerStep) -> Generator:
+    # [FUNCTION DOC]
+    # HELPER: Generator yielding one gradio message for a final answer: formatted text for AgentText, a file
+    #   dict with image/png mime for AgentImage, a file dict with audio/wav mime for AgentAudio, or the str of
+    #   any other value.
+    # Inputs: step_log (FinalAnswerStep).
+    # Outputs: yields one gradio ChatMessage.
+    # Exceptions: ImportError if gradio is missing.
+    # Side effects: to_string on images/audio may write temp files.
     """
     Process a [`FinalAnswerStep`] and yield appropriate gradio.ChatMessage objects.
 
@@ -224,6 +281,15 @@ def _process_final_answer_step(step_log: FinalAnswerStep) -> Generator:
 
 
 def pull_messages_from_step(step_log: ActionStep | PlanningStep | FinalAnswerStep, skip_model_outputs: bool = False):
+    # [FUNCTION DOC]
+    # Generator dispatching a memory step to the matching processor (action, planning, final answer) and
+    #   yielding its gradio messages.
+    # Inputs: step_log (ActionStep, PlanningStep or FinalAnswerStep), skip_model_outputs (bool, default False;
+    #   used when model output was already streamed).
+    # Outputs: yields gradio ChatMessage objects.
+    # Exceptions: ModuleNotFoundError if gradio is not installed; ValueError for unsupported step types (both
+    #   raised on first iteration since this is a generator).
+    # Side effects: those of the processors.
     """Extract Gradio ChatMessage objects from agent steps with proper nesting.
 
     Args:
@@ -252,6 +318,14 @@ def stream_to_gradio(
     reset_agent_memory: bool = False,
     additional_args: dict | None = None,
 ) -> Generator:
+    # [FUNCTION DOC]
+    # Generator that runs the agent in streaming mode and yields gradio messages for each completed step, and
+    #   the accumulated markdown text for each stream delta (reset after every step).
+    # Inputs: agent (MultiStepAgent), task (str), task_images (list or None), reset_agent_memory (bool,
+    #   default False), additional_args (dict or None).
+    # Outputs: yields gradio ChatMessage objects or str (markdown of the partial model output).
+    # Exceptions: ModuleNotFoundError if gradio is missing; errors raised by the agent run.
+    # Side effects: runs the agent (model calls, tool execution).
     """Runs an agent with the given task and streams the messages from the agent as gradio ChatMessages."""
 
     if not _is_package_available("gradio"):
@@ -277,6 +351,15 @@ def stream_to_gradio(
 
 
 class GradioUI:
+    # [CLASS DOC]
+    # Gradio chat application around a MultiStepAgent, built on gradio ChatInterface with optional multimodal
+    #   file uploads and optional memory reset per message.
+    # Inputs: agent (MultiStepAgent), file_upload_folder (str or None; enables uploads and is created if
+    #   missing), reset_agent_memory (bool, default False).
+    # Attributes: agent, file_upload_folder (Path or None), reset_agent_memory, name (agent name or "Agent
+    #   interface"), description (agent description or None).
+    # Exceptions: ModuleNotFoundError if gradio is missing.
+    # Side effects: creates the upload folder; launching starts a web server.
     """
     Gradio interface for interacting with a [`MultiStepAgent`].
 
@@ -308,6 +391,16 @@ class GradioUI:
     """
 
     def __init__(self, agent: MultiStepAgent, file_upload_folder: str | None = None, reset_agent_memory: bool = False):
+        # [FUNCTION DOC]
+        # Checks gradio availability, stores configuration, derives name and description from the agent and
+        #   creates the upload folder when needed.
+        # Inputs: agent, file_upload_folder (str or None), reset_agent_memory (bool).
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if gradio is missing; AttributeError if the agent has no name
+        #   attribute.
+        # Side effects: may create directories.
+        # KNOWN ISSUE: the name is read without a default, so agents lacking a name attribute raise instead of
+        #   falling back to "Agent interface".
         if not _is_package_available("gradio"):
             raise ModuleNotFoundError(
                 "Please install 'gradio' extra to use the GradioUI: `pip install 'smolagents[gradio]'`"
@@ -322,6 +415,13 @@ class GradioUI:
                 self.file_upload_folder.mkdir(parents=True, exist_ok=True)
 
     def _save_uploaded_file(self, file_path: str) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Copies a file into the upload folder under a sanitised basename (characters other than word
+        #   chars, dash and dot become underscores); returns the original path if uploads are disabled.
+        # Inputs: file_path (str).
+        # Outputs: destination path (str).
+        # Exceptions: OSError from copying.
+        # Side effects: writes a file (overwrites same-named files).
         """Save an uploaded file to the upload folder and return the new path."""
         if self.file_upload_folder is None:
             return file_path
@@ -333,6 +433,14 @@ class GradioUI:
         return dest_path
 
     def upload_file(self, file, file_uploads_log: list, allowed_file_types: list | None = None):
+        # [FUNCTION DOC]
+        # Validates and saves an uploaded file: reports "No file uploaded" for None, "File type disallowed"
+        #   for extensions outside the allowed list, otherwise saves it and appends the new path to the log.
+        # Inputs: file (object with a name path or None), file_uploads_log (list), allowed_file_types (list of
+        #   extensions or None; defaults to pdf, docx, txt).
+        # Outputs: tuple (gradio Textbox with status, new uploads list).
+        # Exceptions: ImportError if gradio is missing; OSError from copying.
+        # Side effects: writes the file into the upload folder.
         """
         Handle file upload with validation.
 
@@ -360,6 +468,15 @@ class GradioUI:
         return gr.Textbox(value=f"File uploaded: {file_path}", visible=True), file_uploads_log + [file_path]
 
     def _process_message(self, message: str | dict) -> tuple[str, list[str] | None]:
+        # [FUNCTION DOC]
+        # HELPER: Splits a chat message into task text and files. Strings return no files. For dicts, files
+        #   are saved to the upload folder (when enabled) and a sentence listing them is appended to the text.
+        # Inputs: message (str or dict with text and files).
+        # Outputs: tuple (text, list of file paths or None).
+        # Exceptions: OSError from saving files.
+        # Side effects: may copy files.
+        # KNOWN ISSUE: the returned files are passed to the agent as images by the caller, even when they are
+        #   non-image documents.
         """Process incoming message and extract text and files."""
         if isinstance(message, str):
             return message, None
@@ -376,6 +493,15 @@ class GradioUI:
         return text, files if files else None
 
     def _stream_response(self, message: str | dict, history: list[dict]) -> Generator:  # noqa: ARG002
+        # [FUNCTION DOC]
+        # HELPER: ChatInterface callback generator: runs the agent with the message's text and files,
+        #   maintains a list of messages where a single temporary streaming message (with angle brackets
+        #   escaped) is updated per delta and removed when a step completes, appending the step's gradio
+        #   messages; yields the full list after each change.
+        # Inputs: message (str or dict), history (list, unused).
+        # Outputs: yields the growing list of gradio ChatMessage objects.
+        # Exceptions: errors raised by the agent run.
+        # Side effects: runs the agent; may save uploaded files.
         """Stream agent responses for ChatInterface."""
         import gradio as gr
 
@@ -420,6 +546,13 @@ class GradioUI:
                 yield all_messages
 
     def launch(self, share: bool = True, **kwargs):
+        # [FUNCTION DOC]
+        # Builds the app and launches it with debug enabled.
+        # Inputs: share (bool, default True; creates a public share link), **kwargs (forwarded to gradio
+        #   launch).
+        # Outputs: none (blocks while serving).
+        # Exceptions: gradio launch errors.
+        # Side effects: starts a web server, possibly a public tunnel.
         """
         Launch the Gradio app with the agent interface.
 
@@ -430,6 +563,14 @@ class GradioUI:
         self.create_app().launch(debug=True, share=share, **kwargs)
 
     def create_app(self):
+        # [FUNCTION DOC]
+        # Builds the gradio ChatInterface: a Chatbot with the smolagents avatar and LaTeX delimiters, using
+        #   the messages type only on gradio 5, multimodal input when uploads are enabled, history saving, and
+        #   a title derived from the agent name.
+        # Inputs: none.
+        # Outputs: gradio ChatInterface (Blocks) instance.
+        # Exceptions: ImportError if gradio is missing.
+        # Side effects: none until launched.
         import gradio as gr
 
         # Gradio 5.x requires type="messages", but Gradio 6 removed this parameter

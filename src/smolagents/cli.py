@@ -1,5 +1,13 @@
 #!/usr/bin/env python
 # coding=utf-8
+# [MODULE DOC]
+# Purpose: Command-line entry point (smolagent) that builds a model and a CodeAgent or ToolCallingAgent from
+#   CLI arguments or an interactive questionnaire and runs a prompt.
+# Exports: console, leopard_prompt (default task), parse_arguments, interactive_mode, load_model,
+#   run_smolagent, main.
+# Dependencies: argparse, python-dotenv, rich prompts/console, smolagents agents/models/Tool and default
+#   TOOL_MAPPING.
+# Side effects: creates a module-level rich Console; running as a script calls main.
 
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
@@ -43,6 +51,16 @@ leopard_prompt = "How many seconds would it take for a leopard at full speed to 
 
 
 def parse_arguments():
+    # [FUNCTION DOC]
+    # Defines and parses CLI arguments: optional positional prompt, --model-type (default
+    #   InferenceClientModel), --action-type (default code), --model-id (default a Qwen model), --imports
+    #   (list), --tools (list, default web_search), --verbosity-level (int, default 1) and API options
+    #   --provider, --api-base, --api-key.
+    # Inputs: none (reads sys.argv).
+    # Outputs: argparse Namespace.
+    # Exceptions: SystemExit on invalid arguments or --help.
+    # Side effects: reads process arguments; may print usage.
+    # KNOWN ISSUE: --verbosity-level is parsed but never used by main.
     parser = argparse.ArgumentParser(description="Run a CodeAgent with all specified parameters")
     parser.add_argument(
         "prompt",
@@ -108,6 +126,17 @@ def parse_arguments():
 
 
 def interactive_mode():
+    # [FUNCTION DOC]
+    # Guides the user through agent setup with rich prompts: action type, display of available tools
+    #   (instantiating each to read its description), tool names, model type, model id, optional advanced
+    #   options (provider, API base, API key, extra imports) and the task prompt.
+    # Inputs: none (interactive stdin).
+    # Outputs: tuple (prompt, tools, model_type, model_id, provider, api_base, api_key, imports, action_type).
+    # Exceptions: none raised directly; tool instantiation errors are caught.
+    # Side effects: console output, reads stdin, instantiates default tools.
+    # KNOWN ISSUE: action_type is overwritten to "code" after being asked, so the user's choice is discarded.
+    # KNOWN ISSUE: offers "OpenAIServerModel", which load_model does not accept (it expects "OpenAIModel"),
+    #   causing ValueError; advanced-option empty answers become empty strings rather than None.
     """Run the CLI in interactive mode"""
     console.print(
         Panel.fit(
@@ -192,6 +221,15 @@ def load_model(
     api_key: str | None = None,
     provider: str | None = None,
 ) -> Model:
+    # [FUNCTION DOC]
+    # Instantiates a model by type name: OpenAIModel (api key falls back to FIREWORKS_API_KEY env, base to the
+    #   Fireworks URL), LiteLLMModel (given key/base), TransformersModel (device_map auto),
+    #   InferenceClientModel (token falls back to HF_API_KEY env, with provider).
+    # Inputs: model_type (str), model_id (str), api_base (str or None), api_key (str or None), provider (str
+    #   or None; only used for InferenceClientModel).
+    # Outputs: a Model instance.
+    # Exceptions: ValueError for unsupported model types; model constructor errors.
+    # Side effects: reads environment variables; model construction may load weights or create clients.
     if model_type == "OpenAIModel":
         return OpenAIModel(
             api_key=api_key or os.getenv("FIREWORKS_API_KEY"),
@@ -227,6 +265,15 @@ def run_smolagent(
     provider: str | None = None,
     action_type: str = "code",
 ) -> None:
+    # [FUNCTION DOC]
+    # Loads .env, builds the model, resolves tools (names containing "/" are loaded as Hugging Face Space
+    #   tools with a sanitised name; others from TOOL_MAPPING), creates a streaming CodeAgent (with authorized
+    #   imports) or ToolCallingAgent and runs the prompt.
+    # Inputs: prompt (str), tools (list of str), model_type (str), model_id (str), api_base, api_key, imports
+    #   (list of str or None), provider (str or None), action_type ("code" or "tool_calling", default "code").
+    # Outputs: none (agent result is discarded).
+    # Exceptions: ValueError for unknown tools or action types; errors from model/tool/agent.
+    # Side effects: loads environment from .env; network calls; console output from the agent.
     load_dotenv()
 
     model = load_model(model_type, model_id, api_base=api_base, api_key=api_key, provider=provider)
@@ -260,6 +307,13 @@ def run_smolagent(
 
 
 def main() -> None:
+    # [FUNCTION DOC]
+    # CLI entry point: parses arguments, falls back to interactive_mode when no prompt is given, then calls
+    #   run_smolagent with the collected settings.
+    # Inputs: none (sys.argv / stdin).
+    # Outputs: none.
+    # Exceptions: those of parse_arguments, interactive_mode and run_smolagent.
+    # Side effects: see called functions.
     args = parse_arguments()
 
     # Check if we should run in interactive mode

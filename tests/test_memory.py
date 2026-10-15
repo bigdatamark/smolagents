@@ -1,3 +1,9 @@
+# [MODULE DOC]
+# Purpose: Unit tests for smolagents.memory: AgentMemory init and code extraction, MemoryStep base behaviour,
+#   ActionStep/PlanningStep/TaskStep/SystemPromptStep serialisation and message conversion, JSON-
+#   serialisability of raw fields.
+# Dependencies: pytest, PIL, json, smolagents.memory, smolagents.agents (ToolCall), smolagents.monitoring.
+# Side effects: none.
 import json
 
 import pytest
@@ -18,13 +24,29 @@ from smolagents.monitoring import Timing, TokenUsage
 
 
 class TestAgentMemory:
+    # [CLASS DOC]
+    # Tests for AgentMemory construction and return_full_code.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: none.
     def test_initialization(self):
+        # [FUNCTION DOC]
+        # Checks the system prompt is stored in the system prompt step and steps start empty.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         system_prompt = "This is a system prompt."
         memory = AgentMemory(system_prompt=system_prompt)
         assert memory.system_prompt.system_prompt == system_prompt
         assert memory.steps == []
 
     def test_return_all_code_actions(self):
+        # [FUNCTION DOC]
+        # Checks code actions of action steps are joined with blank lines, skipping steps with no code.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         memory = AgentMemory(system_prompt="This is a system prompt.")
         memory.steps = [
             ActionStep(step_number=1, timing=Timing(start_time=0.0, end_time=1.0), code_action="print('Hello')"),
@@ -35,21 +57,50 @@ class TestAgentMemory:
 
 
 class TestMemoryStep:
+    # [CLASS DOC]
+    # Tests for the MemoryStep base class.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: none.
     def test_initialization(self):
+        # [FUNCTION DOC]
+        # Checks a MemoryStep can be instantiated.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         step = MemoryStep()
         assert isinstance(step, MemoryStep)
 
     def test_dict(self):
+        # [FUNCTION DOC]
+        # Checks the dict form of a field-less MemoryStep is empty.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         step = MemoryStep()
         assert step.dict() == {}
 
     def test_to_messages(self):
+        # [FUNCTION DOC]
+        # Checks to_messages raises NotImplementedError on the base class.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         step = MemoryStep()
         with pytest.raises(NotImplementedError):
             step.to_messages()
 
 
 def test_action_step_dict():
+    # [FUNCTION DOC]
+    # Checks every key of ActionStep.dict for a fully-populated step: serialised messages, tool call dict,
+    #   timing and token usage dicts, and copied scalar fields.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     action_step = ActionStep(
         model_input_messages=[ChatMessage(role=MessageRole.USER, content="Hello")],
         tool_calls=[
@@ -117,6 +168,13 @@ def test_action_step_dict():
 
 
 def test_action_step_to_messages():
+    # [FUNCTION DOC]
+    # Checks a full action step converts to 4 messages: assistant output, tool call listing, image message and
+    #   observation response.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     action_step = ActionStep(
         model_input_messages=[ChatMessage(role=MessageRole.USER, content="Hello")],
         tool_calls=[
@@ -157,6 +215,12 @@ def test_action_step_to_messages():
 
 
 def test_action_step_to_messages_no_tool_calls_with_observations():
+    # [FUNCTION DOC]
+    # Checks a step with only observations yields a single tool-response observation message.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     action_step = ActionStep(
         model_input_messages=None,
         tool_calls=None,
@@ -178,6 +242,12 @@ def test_action_step_to_messages_no_tool_calls_with_observations():
 
 
 def test_planning_step_to_messages():
+    # [FUNCTION DOC]
+    # Checks a planning step yields an assistant and a user message, each with one text content part.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     planning_step = PlanningStep(
         model_input_messages=[ChatMessage(role=MessageRole.USER, content="Hello")],
         model_output_message=ChatMessage(role=MessageRole.ASSISTANT, content="Plan"),
@@ -199,6 +269,12 @@ def test_planning_step_to_messages():
 
 
 def test_task_step_to_messages():
+    # [FUNCTION DOC]
+    # Checks a task step with one image yields one user message with a text part and an image part.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     task_step = TaskStep(task="This is a task.", task_images=[Image.new("RGB", (100, 100))])
     messages = task_step.to_messages(summary_mode=False)
     assert len(messages) == 1
@@ -218,6 +294,12 @@ def test_task_step_to_messages():
 
 
 def test_system_prompt_step_to_messages():
+    # [FUNCTION DOC]
+    # Checks the system prompt step yields one system message with one text part.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     system_prompt_step = SystemPromptStep(system_prompt="This is a system prompt.")
     messages = system_prompt_step.to_messages(summary_mode=False)
     assert len(messages) == 1
@@ -233,11 +315,29 @@ def test_system_prompt_step_to_messages():
 
 
 def test_memory_step_json_serialization():
+    # [FUNCTION DOC]
+    # Checks that ActionStep and PlanningStep dicts are JSON-serialisable even when messages carry a non-
+    #   serialisable raw object, whose string form appears in the output.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure; TypeError from json if serialisation fails.
+    # Side effects: none.
     """Test that memory steps can be JSON serialized without raw fields."""
 
     # Create a mock ChatCompletion-like object (this is what was causing the error)
     class MockChatCompletion:
+        # [CLASS DOC]
+        # HELPER: Minimal non-serialisable stand-in for a provider completion object.
+        # Attributes: id (str), choices (empty list).
+        # Exceptions: none raised directly.
+        # Side effects: none.
         def __init__(self):
+            # [FUNCTION DOC]
+            # HELPER: Sets a fixed id and an empty choices list.
+            # Inputs: none.
+            # Outputs: none.
+            # Exceptions: none raised directly.
+            # Side effects: sets attributes.
             self.id = "chatcmpl-test"
             self.choices = []
 

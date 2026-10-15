@@ -12,6 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Purpose: Unit tests for smolagents.agent_types: AgentAudio from tensors and files, AgentImage from tensors,
+#   paths and PIL images, AgentText from strings.
+# Dependencies: unittest, PIL, torch and soundfile (optional, tests gated by markers), shared_datadir fixture
+#   for image data.
+# Side effects: writes temp audio/image files.
 import os
 import tempfile
 import unittest
@@ -25,6 +31,13 @@ from .utils.markers import require_soundfile, require_torch
 
 
 def get_new_path(suffix="") -> str:
+    # [FUNCTION DOC]
+    # HELPER: Returns a path to a new unique filename (UUID plus suffix) inside a freshly created temp
+    #   directory.
+    # Inputs: suffix (str, default empty).
+    # Outputs: str path (file not created).
+    # Exceptions: OSError if the temp dir cannot be created.
+    # Side effects: creates a temp directory.
     directory = tempfile.mkdtemp()
     return os.path.join(directory, str(uuid.uuid4()) + suffix)
 
@@ -32,7 +45,18 @@ def get_new_path(suffix="") -> str:
 @require_soundfile
 @require_torch
 class AgentAudioTests(unittest.TestCase):
+    # [CLASS DOC]
+    # Tests for AgentAudio; skipped unless soundfile and torch are installed.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: writes temp WAV files.
     def test_from_tensor(self):
+        # [FUNCTION DOC]
+        # Checks a tensor-based AgentAudio round-trips through to_raw and through the WAV file written by
+        #   to_string, which persists after deletion of the object.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes a temp WAV file.
         import soundfile as sf
         import torch
 
@@ -53,6 +77,12 @@ class AgentAudioTests(unittest.TestCase):
         self.assertTrue(torch.allclose(tensor, torch.tensor(new_tensor), atol=1e-4))
 
     def test_from_string(self):
+        # [FUNCTION DOC]
+        # Checks a path-based AgentAudio reads the same samples and returns the original path.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes a temp WAV file.
         import soundfile as sf
         import torch
 
@@ -68,7 +98,20 @@ class AgentAudioTests(unittest.TestCase):
 
 @require_torch
 class TestAgentImage:
+    # [CLASS DOC]
+    # Tests for AgentImage; skipped unless torch is installed.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: writes temp PNG files.
     def test_from_tensor(self):
+        # [FUNCTION DOC]
+        # Checks a tensor-based AgentImage keeps the tensor, converts to a PIL image and its saved file
+        #   persists after deletion.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes a temp PNG.
+        # KNOWN ISSUE: does not check pixel values, so the inversion in the tensor-to-image conversion goes
+        #   undetected.
         import torch
 
         tensor = torch.randint(0, 256, (64, 64, 3))
@@ -85,6 +128,12 @@ class TestAgentImage:
         assert os.path.exists(path)
 
     def test_from_string(self, shared_datadir):
+        # [FUNCTION DOC]
+        # Checks a path-based AgentImage returns the same path and an image equal to opening the file.
+        # Inputs: shared_datadir (pytest-datadir fixture path).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         path = shared_datadir / "000000039769.png"
         image = PIL.Image.open(path)
         agent_type = AgentImage(path)
@@ -97,6 +146,13 @@ class TestAgentImage:
         assert os.path.exists(path)
 
     def test_from_image(self, shared_datadir):
+        # [FUNCTION DOC]
+        # Checks a PIL-based AgentImage returns the same image and saves to a new path different from the
+        #   source.
+        # Inputs: shared_datadir (fixture path).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes a temp PNG.
         path = shared_datadir / "000000039769.png"
         image = PIL.Image.open(path)
         agent_type = AgentImage(image)
@@ -110,7 +166,17 @@ class TestAgentImage:
 
 
 class AgentTextTests(unittest.TestCase):
+    # [CLASS DOC]
+    # Tests for AgentText.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: none.
     def test_from_string(self):
+        # [FUNCTION DOC]
+        # Checks to_string and to_raw both return the original string.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         string = "Hey!"
         agent_type = AgentText(string)
 

@@ -12,6 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Purpose: Tests for monitoring: token accounting of agents via Monitor, gradio streaming output counts,
+#   memory replay with ChatMessages, and AgentLogger.log_task robustness.
+# Dependencies: unittest, pytest, PIL, rich, smolagents agents, models, memory, monitoring, stream_to_gradio.
+# Side effects: tests run agents with fake models and render to recorded consoles.
 
 import unittest
 
@@ -36,7 +41,19 @@ from smolagents.monitoring import AgentLogger, TokenUsage
 
 
 class FakeLLMModel(Model):
+    # [CLASS DOC]
+    # HELPER: Fake Model returning a final_answer tool call when tools are provided, or a code block calling
+    #   final_answer otherwise, each with 10 input and 20 output tokens.
+    # Inputs: Model constructor args.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, prompt, tools_to_call_from=None, **kwargs):
+        # [FUNCTION DOC]
+        # HELPER: Returns the canned assistant ChatMessage described in the class doc.
+        # Inputs: prompt (ignored), tools_to_call_from (list or None), **kwargs (ignored).
+        # Outputs: ChatMessage.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         if tools_to_call_from is not None:
             return ChatMessage(
                 role=MessageRole.ASSISTANT,
@@ -63,9 +80,30 @@ final_answer('This is the final answer.')
 
 
 class MonitoringTester(unittest.TestCase):
+    # [CLASS DOC]
+    # unittest TestCase for agent metrics and gradio streaming outputs.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: runs agents with fake models.
     def test_code_agent_metrics_max_steps(self):
+        # [FUNCTION DOC]
+        # Checks token totals when a malformed answer exhausts max steps: one step plus the final forced
+        #   answer, totalling 20 input and 40 output tokens.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: console output from the agent.
         class FakeLLMModelMalformedAnswer(Model):
+            # [CLASS DOC]
+            # HELPER: Fake model always returning "Malformed answer" with 10/20 token usage.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, prompt, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Returns the malformed assistant message.
+                # Inputs: prompt (ignored), **kwargs (ignored).
+                # Outputs: ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="Malformed answer",
@@ -84,8 +122,24 @@ class MonitoringTester(unittest.TestCase):
         self.assertEqual(agent.monitor.total_output_token_count, 40)
 
     def test_code_agent_metrics_generation_error(self):
+        # [FUNCTION DOC]
+        # Checks that an exception from the model propagates out of agent.run with its message.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: console output.
         class FakeLLMModelGenerationException(Model):
+            # [CLASS DOC]
+            # HELPER: Fake model whose generation always fails.
+            # Exceptions: generate raises Exception.
+            # Side effects: none.
             def generate(self, prompt, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Always raises a generic Exception with "Cannot generate".
+                # Inputs: prompt, **kwargs (ignored).
+                # Outputs: none.
+                # Exceptions: Exception always.
+                # Side effects: none.
                 raise Exception("Cannot generate")
 
         agent = CodeAgent(
@@ -98,6 +152,13 @@ class MonitoringTester(unittest.TestCase):
         assert "Cannot generate" in str(e.value)
 
     def test_streaming_agent_text_output(self):
+        # [FUNCTION DOC]
+        # Checks stream_to_gradio with planning yields 11 outputs, the second containing the code block and
+        #   the last containing the final answer text.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: runs the agent.
         agent = CodeAgent(
             tools=[],
             model=FakeLLMModel(),
@@ -117,8 +178,25 @@ class MonitoringTester(unittest.TestCase):
         self.assertIn("This is the final answer.", final_message.content)
 
     def test_streaming_agent_image_output(self):
+        # [FUNCTION DOC]
+        # Checks a ToolCallingAgent whose final answer is an image passed through additional args streams 7
+        #   outputs, the last being an image/png file message.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes a temp PNG.
         class FakeLLMModelImage(Model):
+            # [CLASS DOC]
+            # HELPER: Fake model calling final_answer with the "image" state variable name.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, prompt, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Returns an assistant message with a final_answer tool call whose answer is "image".
+                # Inputs: prompt, **kwargs (ignored).
+                # Outputs: ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="I will call the final_answer tool.",
@@ -154,8 +232,25 @@ class MonitoringTester(unittest.TestCase):
         self.assertEqual(final_message.content["mime_type"], "image/png")
 
     def test_streaming_with_agent_error(self):
+        # [FUNCTION DOC]
+        # Checks that a malformed model output still streams 11 outputs, the last containing the malformed
+        #   text as final answer.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: runs the agent.
         class DummyModel(Model):
+            # [CLASS DOC]
+            # HELPER: Fake model always returning "Malformed call" without token usage.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, prompt, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Returns the malformed assistant message.
+                # Inputs: prompt, **kwargs (ignored).
+                # Outputs: ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(role=MessageRole.ASSISTANT, content="Malformed call")
 
         agent = CodeAgent(
@@ -175,6 +270,13 @@ class MonitoringTester(unittest.TestCase):
 
 @pytest.mark.parametrize("agent_class", [CodeAgent, ToolCallingAgent])
 def test_code_agent_metrics(agent_class):
+    # [FUNCTION DOC]
+    # Parametrized check that a one-step successful run of CodeAgent or ToolCallingAgent records 10 input and
+    #   20 output tokens.
+    # Inputs: agent_class (CodeAgent or ToolCallingAgent).
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: runs the agent.
     agent = agent_class(
         tools=[],
         model=FakeLLMModel(),
@@ -187,7 +289,18 @@ def test_code_agent_metrics(agent_class):
 
 
 class ReplayTester(unittest.TestCase):
+    # [CLASS DOC]
+    # Regression tests for AgentMemory.replay.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: console output.
     def test_replay_with_chatmessage(self):
+        # [FUNCTION DOC]
+        # Checks detailed replay of a step holding ChatMessage inputs does not raise TypeError.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError (via fail) on TypeError.
+        # Side effects: console output.
+        # KNOWN ISSUE: builds the ActionStep with an integer timing instead of a Timing object.
         """Regression test for dict(message) to message.dict() fix"""
         logger = AgentLogger()
         memory = AgentMemory(system_prompt="test")
@@ -202,7 +315,18 @@ class ReplayTester(unittest.TestCase):
 
 
 class AgentLoggerLogTaskTester(unittest.TestCase):
+    # [CLASS DOC]
+    # Tests that AgentLogger.log_task safely renders arbitrary content and subtitles.
+    # Exceptions: assertion failures on test failure.
+    # Side effects: renders to recorded consoles.
     def test_logger_log_task_does_not_crash_on_stray_markup_or_control_chars(self):
+        # [FUNCTION DOC]
+        # Checks bytes content with stray markup and control characters renders literally, with control chars
+        #   shown as escape sequences.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none outside the recorded console.
         """
         Rich Panels parse `title`/`subtitle` as markup when passed as strings.
         `AgentLogger.log_task()` must be resilient to arbitrary content/subtitle strings
@@ -226,6 +350,12 @@ class AgentLoggerLogTaskTester(unittest.TestCase):
         self.assertIn("bold", rendered)
 
     def test_logger_log_task_accepts_non_string_payloads(self):
+        # [FUNCTION DOC]
+        # Checks dict content and subtitle are rendered without errors.
+        # Inputs: none.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none outside the recorded console.
         console = Console(record=True, width=120, highlight=False)
         logger = AgentLogger(console=console)
 
