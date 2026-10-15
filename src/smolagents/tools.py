@@ -14,6 +14,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Core tool abstractions for smolagents: the Tool base class that agents call, helpers to build tools from
+#   plain functions (the tool decorator), from Hub Spaces, Gradio tools, LangChain tools, Hub repos, code
+#   strings and dicts, plus ToolCollection (load many tools from a Hub collection or an MCP server),
+#   PipelineTool (transformers-backed tools), Gradio demo launching, sandbox tool-definition code generation and
+#   runtime argument validation against a tool's input schema.
+# Inputs: depends on huggingface_hub (repo/commit/download/collection APIs), the internal type-hint-to-JSON-
+#   schema utilities, agent_types (AgentImage/AgentAudio and input/output sanitizers), tool_validation
+#   (MethodChecker, validate_tool_attributes) and utils (source extraction, name validation, builtin module
+#   list). Optional lazy deps: gradio, gradio_client, PIL, mcpadapt, transformers, accelerate, torch.
+# Outputs: public exports are AUTHORIZED_TYPES, Tool, tool, load_tool, launch_gradio_demo, ToolCollection;
+#   also defines BaseTool, PipelineTool, CONVERSION_DICT, validate_after_init, add_description,
+#   get_tools_definition_code and validate_tool_arguments at module level.
+# Exceptions: none raised at import time beyond import errors of hard dependencies.
+# Side effects: creates a module-level logger; no other import-time side effects.
 from __future__ import annotations
 
 import ast
@@ -68,10 +83,28 @@ logger = logging.getLogger(__name__)
 
 
 def validate_after_init(cls):
+    # [FUNCTION DOC]
+    # HELPER: Class decorator that wraps a class's constructor so argument validation runs after construction.
+    # Inputs: cls (a class that defines a validate_arguments method).
+    # Outputs: the same class object, whose constructor is replaced by a wrapper that calls the original
+    #   constructor and then the instance's validate_arguments method.
+    # Exceptions: none raised directly; anything raised by the original constructor or validate_arguments
+    #   propagates.
+    # Side effects: mutates cls by reassigning its __init__ attribute.
     original_init = cls.__init__
 
     @wraps(original_init)
     def new_init(self, *args, **kwargs):
+        # [FUNCTION DOC]
+        # HELPER: Replacement constructor installed by validate_after_init.
+        # Inputs: self (the instance), any positional and keyword args (forwarded unchanged to the original
+        #   constructor).
+        # Outputs: none.
+        # Exceptions: propagates errors from the original constructor and from self.validate_arguments.
+        # Side effects: initializes the instance via the original constructor, then validates it.
+        # KNOWN ISSUE: since Tool.__init_subclass__ wraps every subclass, a subclass constructor that calls
+        #   the parent constructor triggers validation once per wrapped level of the hierarchy (redundant
+        #   repeated validation).
         original_init(self, *args, **kwargs)
         self.validate_arguments()
 
@@ -96,14 +129,42 @@ CONVERSION_DICT = {"str": "string", "int": "integer", "float": "number"}
 
 
 class BaseTool(ABC):
+    # [CLASS DOC]
+    # Minimal abstract interface for anything callable as a tool by an agent.
+    # Inputs: no constructor args; subclasses must provide a name class attribute (str).
+    # Key attributes: name (str), the identifier used by agents.
+    # Outputs: n/a (abstract base; cannot be instantiated without implementing the call method).
+    # Exceptions: TypeError on instantiation if the abstract call method is not implemented.
+    # Side effects: none.
     name: str
 
     @abstractmethod
     def __call__(self, *args, **kwargs) -> Any:
+        # [FUNCTION DOC]
+        # Abstract call entry point that concrete tools must implement.
+        # Inputs: arbitrary positional and keyword arguments.
+        # Outputs: any value (the tool's result); the base implementation does nothing and returns None.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         pass
 
 
 class Tool(BaseTool):
+    # [CLASS DOC]
+    # Base class for agent tools. Subclasses set class attributes name (valid Python identifier), description
+    #   (str), inputs (dict mapping input name to a dict with at least type and description keys; type is one of
+    #   AUTHORIZED_TYPES or a list of them; optional nullable key), output_type (one of AUTHORIZED_TYPES) and
+    #   optionally output_schema (dict JSON schema, informational only), and implement forward whose parameters
+    #   (besides self) must exactly match the keys of inputs.
+    # Inputs: constructor accepts and ignores any args; sets is_initialized to False. Every subclass's
+    #   constructor is automatically wrapped (via __init_subclass__ and validate_after_init) so
+    #   validate_arguments runs after init.
+    # Key attributes: name, description, inputs, output_type, output_schema, is_initialized, and optionally
+    #   skip_forward_signature_validation (True disables forward-signature checks).
+    # Outputs: instances are callable; calling runs setup lazily then forward.
+    # Exceptions: construction of subclasses raises TypeError/ValueError/AssertionError/Exception on invalid
+    #   attributes (see validate_arguments).
+    # Side effects: subclass creation mutates the subclass's constructor.
     """
     A base class for the functions used by the agent. Subclass this and implement the `forward` method as well as the
     following class attributes:
@@ -135,13 +196,44 @@ class Tool(BaseTool):
     output_schema: dict[str, Any] | None = None
 
     def __init__(self, *args, **kwargs):
+        # [FUNCTION DOC]
+        # Base constructor: marks the tool as not yet set up.
+        # Inputs: any positional and keyword args (ignored).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: sets self.is_initialized to False.
         self.is_initialized = False
 
     def __init_subclass__(cls, **kwargs):
+        # [FUNCTION DOC]
+        # Hook run whenever a subclass of Tool is defined; ensures validation runs after each instance is
+        #   constructed.
+        # Inputs: cls (the new subclass), kwargs (forwarded to the parent hook).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: replaces the subclass's constructor with a validating wrapper (see
+        #   validate_after_init).
         super().__init_subclass__(**kwargs)
         validate_after_init(cls)
 
     def validate_arguments(self):
+        # [FUNCTION DOC]
+        # Validates the tool's attributes and forward signature after construction. Checks, in order:
+        #   description, name, inputs, output_type exist (non-None) and are str/str/dict/str; output_schema is
+        #   None or a dict; name is a valid non-keyword identifier; each inputs entry is a dict with type and
+        #   description keys, whose type is a string or list of strings, all within AUTHORIZED_TYPES;
+        #   output_type is in AUTHORIZED_TYPES. Unless skip_forward_signature_validation is True: the set of
+        #   forward parameter names (excluding self) must equal the set of inputs keys; every input must appear
+        #   in the JSON schema derived from forward's type hints; and the nullable flag must be present in
+        #   inputs iff the type-hint schema marks the parameter nullable (Optional type or default value).
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: TypeError (missing/wrong-typed attribute, bad type spec), ValueError (unauthorized
+        #   type), generic Exception (invalid name, forward params mismatch), AssertionError (malformed inputs
+        #   entry, bad output_type, missing schema key, nullable mismatch).
+        # Side effects: none.
+        # KNOWN ISSUE: several checks use assert statements, which are skipped when Python runs with
+        #   optimizations (-O).
         required_attributes = {
             "description": str,
             "name": str,
@@ -226,9 +318,25 @@ class Tool(BaseTool):
                     )
 
     def forward(self, *args, **kwargs):
+        # [FUNCTION DOC]
+        # Default implementation of the tool's logic; subclasses must override it.
+        # Inputs: any args (ignored).
+        # Outputs: none (always raises).
+        # Exceptions: NotImplementedError always.
+        # Side effects: none.
         raise NotImplementedError("Write this method in your subclass of `Tool`.")
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        # [FUNCTION DOC]
+        # Invokes the tool: lazily runs setup on first use, normalizes arguments, optionally sanitizes
+        #   inputs/outputs, and calls forward. If exactly one positional arg is given, no kwargs, the arg is a
+        #   dict, and all its keys are input names, the dict is unpacked into keyword arguments.
+        # Inputs: args/kwargs for forward; sanitize_inputs_outputs (bool, default False): when True, agent-
+        #   typed inputs are converted to raw values before forward and the output is wrapped into the agent
+        #   type matching output_type.
+        # Outputs: the (optionally sanitized) result of forward.
+        # Exceptions: none raised directly; errors from setup, forward or sanitizers propagate.
+        # Side effects: may call setup (which sets is_initialized); whatever forward does.
         if not self.is_initialized:
             self.setup()
 
@@ -249,6 +357,13 @@ class Tool(BaseTool):
         return outputs
 
     def setup(self):
+        # [FUNCTION DOC]
+        # Hook for expensive one-time initialization run on first call; base version only marks the tool
+        #   initialized.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: sets self.is_initialized to True.
         """
         Overwrite this method here for any operation that is expensive and needs to be executed before you start using
         your tool. Such as loading a big model.
@@ -256,6 +371,17 @@ class Tool(BaseTool):
         self.is_initialized = True
 
     def to_code_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Renders the tool as a Python-like function stub (signature plus docstring) for code-agent prompts.
+        #   The signature lists each input as name: type (JSON type strings), and the return type is dict when
+        #   an output_schema is set, otherwise output_type. The docstring holds the description, an extra note
+        #   about structured output if a schema exists, an Args section (one line per input with its
+        #   description) when there are inputs, and a Returns section with the JSON-dumped schema (indent 4)
+        #   when a schema exists. Body is indented 4.
+        # Inputs: self.
+        # Outputs: str, the stub text starting with def followed by the tool name.
+        # Exceptions: KeyError if an inputs entry lacks type or description.
+        # Side effects: none.
         args_signature = ", ".join(f"{arg_name}: {arg_schema['type']}" for arg_name, arg_schema in self.inputs.items())
 
         # Use dict type for tools with output schema to indicate structured return
@@ -287,9 +413,37 @@ class Tool(BaseTool):
         return f"def {self.name}{tool_signature}:\n{textwrap.indent(tool_doc, '    ')}"
 
     def to_tool_calling_prompt(self) -> str:
+        # [FUNCTION DOC]
+        # Renders a short textual summary for tool-calling-agent prompts: name and description, then indented
+        #   lines with the raw inputs dict representation and the output type.
+        # Inputs: self.
+        # Outputs: str.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         return f"{self.name}: {self.description}\n    Takes inputs: {self.inputs}\n    Returns an output of type: {self.output_type}"
 
     def to_dict(self) -> dict:
+        # [FUNCTION DOC]
+        # Serializes the tool into a dict containing standalone source code that recreates it. For tools
+        #   created with the tool decorator (class named SimpleTool): parses the forward source (with the
+        #   decorator text removed) and validates it with MethodChecker for self-contained imports/names, then
+        #   generates a Tool subclass source with name, description, inputs, output_type (and output_schema if
+        #   set) class attributes, appending the original function source renamed to forward with self added as
+        #   first parameter.
+        # For other tools: refuses wrappers (SpaceToolWrapper, LangChainToolWrapper, GradioToolWrapper),
+        #   validates class attributes with validate_tool_attributes, and uses instance_to_source to generate
+        #   code, prefixed with a typing import line. Requirements are the non-stdlib top-level imports detected
+        #   in the code, plus smolagents, sorted.
+        # Inputs: self.
+        # Outputs: dict with keys name, code, requirements (sorted list), and output_schema when set.
+        # Exceptions: ValueError if SimpleTool validation fails or the tool is a non-serializable wrapper;
+        #   errors from validate_tool_attributes/source extraction propagate.
+        # Side effects: none.
+        # KNOWN ISSUE: for SimpleTool it replaces every occurrence of the tool name in the forward source (not
+        #   only the function name) with forward, which can corrupt code or strings that contain the name.
+        # KNOWN ISSUE: the output_schema line appended for SimpleTool keeps a hard-coded 16-space indent after
+        #   the class body was already dedented, so the generated class source is likely mis-indented when a
+        #   schema is present.
         """Returns a dictionary representing the tool"""
         class_name = self.__class__.__name__
         if type(self).__name__ == "SimpleTool":
@@ -324,10 +478,26 @@ class Tool(BaseTool):
             import re
 
             def add_self_argument(source_code: str) -> str:
+                # [FUNCTION DOC]
+                # HELPER: Inserts self as the first parameter of a forward function definition in source text.
+                # Inputs: source_code (str).
+                # Outputs: str, the source with forward's parameter list prefixed by self (unless it already
+                #   starts with self).
+                # Exceptions: none raised directly.
+                # Side effects: none.
+                # KNOWN ISSUE: the regex stops at the first closing parenthesis, so parameter lists containing
+                #   parentheses (e.g. defaults with calls or tuple annotations) are not handled correctly.
                 """Add 'self' as first argument to a function definition if not present."""
                 pattern = r"def forward\(((?!self)[^)]*)\)"
 
                 def replacement(match):
+                    # [FUNCTION DOC]
+                    # HELPER: Regex substitution callback producing the new forward definition header.
+                    # Inputs: match (regex match whose first group is the original parameter text).
+                    # Outputs: str, the forward header with self alone or self followed by the stripped
+                    #   original parameters.
+                    # Exceptions: none raised directly.
+                    # Side effects: none.
                     args = match.group(1).strip()
                     if args:  # If there are other arguments
                         return f"def forward(self, {args})"
@@ -366,6 +536,14 @@ class Tool(BaseTool):
 
     @classmethod
     def from_dict(cls, tool_dict: dict[str, Any], **kwargs) -> "Tool":
+        # [FUNCTION DOC]
+        # Recreates a tool from the dict produced by to_dict.
+        # Inputs: tool_dict (dict; must contain code, may contain output_schema); kwargs forwarded to the tool
+        #   constructor.
+        # Outputs: a Tool instance built via from_code, with output_schema overwritten from the dict when
+        #   present.
+        # Exceptions: ValueError if code is missing; errors from from_code propagate.
+        # Side effects: executes arbitrary code from the dict (via from_code).
         """
         Create tool from a dictionary representation.
 
@@ -388,6 +566,16 @@ class Tool(BaseTool):
         return tool
 
     def save(self, output_dir: str | Path, tool_file_name: str = "tool", make_gradio_app: bool = True):
+        # [FUNCTION DOC]
+        # Writes the tool's files into a directory: the tool source file and, optionally, a Gradio app and
+        #   requirements.
+        # Inputs: output_dir (str or Path; created with parents if missing), tool_file_name (str, default
+        #   tool; file is named with a .py suffix), make_gradio_app (bool, default True): also write app.py
+        #   (importing the tool class from the tool module) and requirements.txt (newline-joined requirements).
+        # Outputs: none.
+        # Exceptions: errors from to_dict (e.g. ValueError for unsavable tools) and filesystem errors
+        #   propagate.
+        # Side effects: creates directories and writes UTF-8 files on disk.
         """
         Saves the relevant code files for your tool so it can be pushed to the Hub. This will copy the code of your
         tool in `output_dir` as well as autogenerate:
@@ -415,6 +603,12 @@ class Tool(BaseTool):
             self._write_file(output_path / "requirements.txt", self._get_requirements())
 
     def _write_file(self, file_path: Path, content: str) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Writes text to a path using UTF-8 encoding (overwriting any existing file).
+        # Inputs: file_path (Path), content (str).
+        # Outputs: none.
+        # Exceptions: OSError on filesystem failures.
+        # Side effects: writes a file.
         """Writes content to a file with UTF-8 encoding."""
         file_path.write_text(content, encoding="utf-8")
 
@@ -426,6 +620,16 @@ class Tool(BaseTool):
         token: bool | str | None = None,
         create_pr: bool = False,
     ) -> str:
+        # [FUNCTION DOC]
+        # Uploads the tool as a Gradio Space on the Hugging Face Hub: ensures the Space repo exists (tagged
+        #   smolagents and tool), then commits tool.py, app.py and requirements.txt in one commit.
+        # Inputs: repo_id (str), commit_message (str, default Upload tool), private (bool or None; ignored if
+        #   repo exists), token (bool, str or None; HF auth), create_pr (bool, default False: open a PR instead
+        #   of committing directly).
+        # Outputs: the result of huggingface_hub create_commit (a commit info object).
+        # Exceptions: huggingface_hub HTTP/auth errors and to_dict errors propagate.
+        # Side effects: network calls creating/updating a remote repo, its metadata and contents.
+        # KNOWN ISSUE: annotated as returning str, but create_commit returns a CommitInfo object.
         """
         Upload the tool to the Hub.
 
@@ -459,6 +663,13 @@ class Tool(BaseTool):
 
     @staticmethod
     def _initialize_hub_repo(repo_id: str, token: bool | str | None, private: bool | None) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Creates (or reuses) a Gradio Space repo on the Hub and tags it with smolagents and tool
+        #   metadata.
+        # Inputs: repo_id (str), token (bool, str or None), private (bool or None).
+        # Outputs: str, the canonical repo id returned by the Hub.
+        # Exceptions: huggingface_hub errors propagate.
+        # Side effects: network calls creating the repo (exist_ok) and updating its metadata.
         """Initialize repository on Hugging Face Hub."""
         repo_url = create_repo(
             repo_id=repo_id,
@@ -472,6 +683,13 @@ class Tool(BaseTool):
         return repo_url.repo_id
 
     def _prepare_hub_files(self) -> list:
+        # [FUNCTION DOC]
+        # HELPER: Builds the list of commit operations for uploading the tool: tool.py (tool code), app.py
+        #   (Gradio app importing from the tool module) and requirements.txt, each as UTF-8 bytes.
+        # Inputs: self.
+        # Outputs: list of three CommitOperationAdd objects.
+        # Exceptions: errors from to_dict propagate.
+        # Side effects: none.
         """Prepare files for Hub commit."""
         additions = [
             # Add tool code
@@ -493,10 +711,23 @@ class Tool(BaseTool):
         return additions
 
     def _get_tool_code(self) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Returns the serialized tool source code (the code entry of to_dict).
+        # Inputs: self.
+        # Outputs: str.
+        # Exceptions: errors from to_dict propagate.
+        # Side effects: none.
         """Get the tool's code."""
         return self.to_dict()["code"]
 
     def _get_gradio_app_code(self, tool_module_name: str = "tool") -> str:
+        # [FUNCTION DOC]
+        # HELPER: Generates the source of a small Gradio app that imports the tool class from a module,
+        #   instantiates it with no arguments and launches the Gradio demo.
+        # Inputs: tool_module_name (str, default tool).
+        # Outputs: str, the app source.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """Get the Gradio app code."""
         class_name = self.__class__.__name__
         return textwrap.dedent(
@@ -510,6 +741,12 @@ class Tool(BaseTool):
         )
 
     def _get_requirements(self) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Returns the tool's requirements (from to_dict) joined by newlines.
+        # Inputs: self.
+        # Outputs: str.
+        # Exceptions: errors from to_dict propagate.
+        # Side effects: none.
         """Get the requirements."""
         return "\n".join(self.to_dict()["requirements"])
 
@@ -521,6 +758,18 @@ class Tool(BaseTool):
         trust_remote_code: bool = False,
         **kwargs,
     ):
+        # [FUNCTION DOC]
+        # Downloads a tool's tool.py from a Hub Space and instantiates it.
+        # Inputs: repo_id (str, Space id), token (str or None), trust_remote_code (bool, default False; must
+        #   be True), kwargs: cache_dir, force_download, proxies, revision, subfolder, local_files_only are used
+        #   for the download.
+        # Outputs: a Tool instance built via Tool.from_code.
+        # Exceptions: ValueError if trust_remote_code is False; download errors and from_code errors
+        #   propagate.
+        # Side effects: network download into the HF cache; reads the file; executes remote code.
+        # KNOWN ISSUE: contrary to the docstring, kwargs are not split: all kwargs (including Hub download
+        #   ones) are also passed to the tool constructor, which can fail for constructors not accepting them.
+        # KNOWN ISSUE: always uses Tool.from_code instead of cls.from_code, ignoring the calling subclass.
         """
         Loads a tool defined on the Hub.
 
@@ -570,6 +819,18 @@ class Tool(BaseTool):
 
     @classmethod
     def from_code(cls, tool_code: str, **kwargs):
+        # [FUNCTION DOC]
+        # Executes a source string in a fresh module and instantiates the first Tool subclass found in it. If
+        #   the found class's inputs (or output_schema) is a string, it is converted with a literal evaluation.
+        # Inputs: tool_code (str, Python source defining a Tool subclass), kwargs forwarded to the class
+        #   constructor.
+        # Outputs: an instance of the discovered Tool subclass.
+        # Exceptions: ValueError if no Tool subclass is found; any exception from executing the code or
+        #   constructing.
+        # Side effects: executes arbitrary code; may mutate class attributes inputs/output_schema of the found
+        #   class.
+        # KNOWN ISSUE: the first subclass is chosen by inspect.getmembers alphabetical order, so a module that
+        #   also imports or defines other Tool subclasses may yield the wrong class.
         module = types.ModuleType("dynamic_tool")
 
         exec(tool_code, module.__dict__)
@@ -604,6 +865,17 @@ class Tool(BaseTool):
         api_name: str | None = None,
         token: str | None = None,
     ):
+        # [FUNCTION DOC]
+        # Creates a tool that calls a Gradio Space via gradio_client.
+        # Inputs: space_id (str), name (str), description (str, default empty), api_name (str or None:
+        #   endpoint to use, defaults to the first named endpoint with a warning), token (str or None: HF token
+        #   for private Spaces/quota).
+        # Outputs: a SpaceToolWrapper instance (Tool subclass) whose inputs and output_type are derived from
+        #   the Space API.
+        # Exceptions: ImportError if gradio_client is missing; KeyError if api_name is not found; client
+        #   errors propagate.
+        # Side effects: network calls to the Space to fetch its API description; emits a warning when api_name
+        #   is None.
         """
         Creates a [`Tool`] from a Space given its id on the Hub.
 
@@ -643,6 +915,15 @@ class Tool(BaseTool):
         from gradio_client import Client, handle_file
 
         class SpaceToolWrapper(Tool):
+            # [CLASS DOC]
+            # HELPER: Tool subclass wrapping a gradio_client Client for a Space endpoint. Skips forward
+            #   signature validation.
+            # Inputs: constructor args space_id, name, description, api_name, token (see from_space).
+            # Key attributes: client (gradio Client), api_name, inputs (built from endpoint parameters),
+            #   output_type.
+            # Outputs: instances call the Space and return its prediction.
+            # Exceptions: see constructor and forward.
+            # Side effects: network calls.
             skip_forward_signature_validation = True
 
             def __init__(
@@ -653,6 +934,21 @@ class Tool(BaseTool):
                 api_name: str | None = None,
                 token: str | None = None,
             ):
+                # [FUNCTION DOC]
+                # HELPER: Connects to the Space, reads its named endpoints, picks the endpoint and builds
+                #   inputs/output_type. Each endpoint parameter becomes an input with type from the parameter's
+                #   type (object mapped to any), description from its python type description, and nullable set
+                #   to whether it has a default. output_type is image for an Image return component, audio for
+                #   Audio, else any. Marks the tool initialized.
+                # Inputs: space_id (str), name (str), description (str, default empty), api_name (str or
+                #   None), token (str or None).
+                # Outputs: none.
+                # Exceptions: AssertionError if the API description is not a dict; KeyError if api_name is
+                #   unknown; client errors.
+                # Side effects: network calls; warning when api_name defaults; does not call the base
+                #   constructor.
+                # KNOWN ISSUE: parameter types from the Space (e.g. lists or unknown type names) are not
+                #   normalized and can fail the AUTHORIZED_TYPES validation run after construction.
                 self.name = name
                 self.description = description
                 self.client = Client(space_id, hf_token=token)
@@ -692,6 +988,14 @@ class Tool(BaseTool):
                 self.is_initialized = True
 
             def sanitize_argument_for_prediction(self, arg):
+                # [FUNCTION DOC]
+                # HELPER: Converts an argument into a form gradio_client accepts: PIL images are saved to a
+                #   temporary PNG and replaced by its path; existing file paths (str or Path) and HTTP URLs are
+                #   wrapped with handle_file.
+                # Inputs: arg (any).
+                # Outputs: the possibly converted argument.
+                # Exceptions: ImportError if gradio_client or PIL is missing; image save errors propagate.
+                # Side effects: may create a temporary file that is never deleted.
                 from gradio_client.utils import is_http_url_like
                 from PIL.Image import Image
 
@@ -708,6 +1012,18 @@ class Tool(BaseTool):
                 return arg
 
             def forward(self, *args, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Sanitizes all args/kwargs, calls the Space endpoint, and post-processes the result.
+                #   If the result is a tuple/list and its second element is a string, it is treated as an error
+                #   message; otherwise the first element is kept. String results ending with an image or audio
+                #   extension are wrapped as AgentImage or AgentAudio.
+                # Inputs: any positional and keyword arguments for the endpoint.
+                # Outputs: the prediction (raw value, AgentImage or AgentAudio).
+                # Exceptions: ValueError when the Space returns an error message; client errors propagate.
+                # Side effects: network call; mutates the kwargs dict in place; may create temporary files.
+                # KNOWN ISSUE: a list/tuple result with a single element raises IndexError when checking the
+                #   second element, and a legitimate string second element (not an error) is misreported as an
+                #   error.
                 # Preprocess args and kwargs:
                 args = list(args)
                 for i, arg in enumerate(args):
@@ -740,13 +1056,41 @@ class Tool(BaseTool):
 
     @staticmethod
     def from_gradio(gradio_tool):
+        # [FUNCTION DOC]
+        # Wraps a gradio_tools-style tool object as a smolagents Tool.
+        # Inputs: gradio_tool (object with name, description and a run method whose parameters are annotated
+        #   with str, int or float type names).
+        # Outputs: a GradioToolWrapper instance with output_type string and forward bound to gradio_tool.run.
+        # Exceptions: KeyError if a run parameter annotation is not str/int/float; validation errors
+        #   propagate.
+        # Side effects: none.
         """
         Creates a [`Tool`] from a gradio tool.
         """
         import inspect
 
         class GradioToolWrapper(Tool):
+            # [CLASS DOC]
+            # HELPER: Tool subclass adapting a gradio tool; forward is the gradio tool's run method.
+            # Inputs: constructor arg _gradio_tool.
+            # Key attributes: name, description, output_type (string), inputs (derived from run's signature,
+            #   empty descriptions), forward.
+            # Outputs: n/a.
+            # Exceptions: see constructor.
+            # Side effects: none.
             def __init__(self, _gradio_tool):
+                # [FUNCTION DOC]
+                # HELPER: Copies name/description from the gradio tool, sets output_type string, builds inputs
+                #   from run's parameters (annotation mapped through CONVERSION_DICT, empty description) and
+                #   assigns forward to run.
+                # Inputs: _gradio_tool (gradio tool object).
+                # Outputs: none.
+                # Exceptions: KeyError for annotations not in CONVERSION_DICT.
+                # Side effects: none.
+                # KNOWN ISSUE: neither calls the base constructor nor sets is_initialized, so calling the
+                #   wrapper raises AttributeError when Tool.__call__ reads is_initialized.
+                # KNOWN ISSUE: annotations are looked up as given; real type objects (not strings) like the
+                #   str class would not match the string keys of CONVERSION_DICT.
                 self.name = _gradio_tool.name
                 self.description = _gradio_tool.description
                 self.output_type = "string"
@@ -761,14 +1105,36 @@ class Tool(BaseTool):
 
     @staticmethod
     def from_langchain(langchain_tool):
+        # [FUNCTION DOC]
+        # Wraps a LangChain tool as a smolagents Tool.
+        # Inputs: langchain_tool (object with name, description, args dict and run method).
+        # Outputs: a LangChainToolWrapper instance (output_type string).
+        # Exceptions: validation errors propagate (e.g. invalid name or unauthorized input types).
+        # Side effects: mutates the per-input dicts of the LangChain tool's args (they are shallow-copied
+        #   only).
         """
         Creates a [`Tool`] from a langchain tool.
         """
 
         class LangChainToolWrapper(Tool):
+            # [CLASS DOC]
+            # HELPER: Tool subclass adapting a LangChain tool; skips forward signature validation.
+            # Inputs: constructor arg _langchain_tool.
+            # Key attributes: name (lowercased), description, inputs, output_type (string), langchain_tool.
+            # Outputs: n/a.
+            # Exceptions: see constructor.
+            # Side effects: see constructor.
             skip_forward_signature_validation = True
 
             def __init__(self, _langchain_tool):
+                # [FUNCTION DOC]
+                # HELPER: Builds inputs from the LangChain tool's args: removes title keys and sets empty
+                #   descriptions; lowercases the name; sets output_type string; marks initialized.
+                # Inputs: _langchain_tool.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates the nested dicts of the LangChain tool's args (shallow copy of the
+                #   outer dict only).
                 self.name = _langchain_tool.name.lower()
                 self.description = _langchain_tool.description
                 self.inputs = _langchain_tool.args.copy()
@@ -781,6 +1147,15 @@ class Tool(BaseTool):
                 self.is_initialized = True
 
             def forward(self, *args, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Builds a tool-input dict from kwargs plus positional args, then runs the LangChain
+                #   tool.
+                # Inputs: positional args (mapped to input names) and keyword args.
+                # Outputs: the LangChain tool's run result.
+                # Exceptions: errors from the LangChain tool propagate.
+                # Side effects: whatever the LangChain tool does.
+                # KNOWN ISSUE: every positional argument is assigned to the first input key, so with multiple
+                #   positional args each overwrites the previous and other inputs are never filled.
                 tool_input = kwargs.copy()
                 for index, argument in enumerate(args):
                     if index < len(self.inputs):
@@ -792,6 +1167,15 @@ class Tool(BaseTool):
 
 
 def launch_gradio_demo(tool: Tool):
+    # [FUNCTION DOC]
+    # Launches a Gradio Interface for a tool: one component per input (by type: boolean checkbox, image,
+    #   audio, string textbox, integer/number number field) and one output component for output_type; the
+    #   interface calls the tool with input/output sanitization.
+    # Inputs: tool (Tool).
+    # Outputs: none.
+    # Exceptions: ImportError if gradio is not installed; KeyError for input or output types without a mapped
+    #   component (e.g. array, object, any, null, or list-typed inputs).
+    # Side effects: starts a Gradio web server (blocking launch).
     """
     Launches a gradio demo for a tool. The corresponding tool class needs to properly implement the class attributes
     `inputs` and `output_type`.
@@ -814,6 +1198,13 @@ def launch_gradio_demo(tool: Tool):
     }
 
     def tool_forward(*args, **kwargs):
+        # [FUNCTION DOC]
+        # HELPER: Gradio callback that calls the tool with sanitize_inputs_outputs enabled; its signature is
+        #   set to the tool's forward signature.
+        # Inputs: any args/kwargs for the tool.
+        # Outputs: the tool's sanitized output.
+        # Exceptions: tool errors propagate.
+        # Side effects: whatever the tool does.
         return tool(*args, sanitize_inputs_outputs=True, **kwargs)
 
     tool_forward.__signature__ = inspect.signature(tool.forward)
@@ -844,6 +1235,15 @@ def load_tool(
     trust_remote_code: bool = False,
     **kwargs,
 ):
+    # [FUNCTION DOC]
+    # Convenience wrapper that loads a tool from a Hub Space by delegating to Tool.from_hub.
+    # Inputs: repo_id (str), model_repo_id (str or None), token (str or None), trust_remote_code (bool,
+    #   default False), kwargs (download options and constructor args).
+    # Outputs: a Tool instance.
+    # Exceptions: ValueError if trust_remote_code is False; errors from from_hub propagate.
+    # Side effects: network download and execution of remote code.
+    # KNOWN ISSUE: model_repo_id is forwarded as a keyword argument into kwargs and thus to the tool's
+    #   constructor; tools whose constructor does not accept it will fail.
     """
     Main function to quickly load a tool from the Hub.
 
@@ -880,11 +1280,24 @@ def load_tool(
 
 
 def add_description(description):
+    # [FUNCTION DOC]
+    # Decorator factory attaching a description and name to a function.
+    # Inputs: description (any, normally str).
+    # Outputs: a decorator that returns the same function with description and name (the function's own name)
+    #   attributes set.
+    # Exceptions: none raised directly.
+    # Side effects: the returned decorator mutates the decorated function's attributes.
     """
     A decorator that adds a description to a function.
     """
 
     def inner(func):
+        # [FUNCTION DOC]
+        # HELPER: Sets description and name attributes on the given function and returns it.
+        # Inputs: func (function).
+        # Outputs: the same function.
+        # Exceptions: AttributeError if func does not accept attribute assignment.
+        # Side effects: mutates func.
         func.description = description
         func.name = func.__name__
         return func
@@ -893,6 +1306,14 @@ def add_description(description):
 
 
 class ToolCollection:
+    # [CLASS DOC]
+    # Container holding a list of tools, with constructors loading them from a Hub collection or an MCP
+    #   server.
+    # Inputs: constructor arg tools (list of Tool).
+    # Key attributes: tools (list of Tool).
+    # Outputs: n/a.
+    # Exceptions: none raised directly by the constructor.
+    # Side effects: none.
     """
     Tool collections enable loading a collection of tools in the agent's toolbox.
 
@@ -904,6 +1325,12 @@ class ToolCollection:
     """
 
     def __init__(self, tools: list[Tool]):
+        # [FUNCTION DOC]
+        # Stores the given list of tools.
+        # Inputs: tools (list of Tool).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: sets self.tools (no copy).
         self.tools = tools
 
     @classmethod
@@ -913,6 +1340,14 @@ class ToolCollection:
         token: str | None = None,
         trust_remote_code: bool = False,
     ) -> "ToolCollection":
+        # [FUNCTION DOC]
+        # Loads all Space items of a Hub collection as tools via Tool.from_hub.
+        # Inputs: collection_slug (str), token (str or None), trust_remote_code (bool, default False).
+        # Outputs: a ToolCollection (constructed via cls) with one tool per unique Space id (order
+        #   unspecified, from a set).
+        # Exceptions: ValueError if trust_remote_code is False (from Tool.from_hub, only if the collection has
+        #   Spaces); Hub/network errors propagate.
+        # Side effects: network calls; downloads and executes remote code.
         """Loads a tool collection from the Hub.
 
         it adds a collection of tools from all Spaces in the collection to the agent's toolbox
@@ -954,6 +1389,22 @@ class ToolCollection:
         trust_remote_code: bool = False,
         structured_output: bool | None = None,
     ) -> "ToolCollection":
+        # [FUNCTION DOC]
+        # Context manager that connects to an MCP server via mcpadapt and yields a ToolCollection of its
+        #   tools; the connection is closed on exit. For dict parameters, transport defaults to streamable-http
+        #   (written into the dict) and must be sse or streamable-http. structured_output None emits a
+        #   FutureWarning and is treated as False.
+        # Inputs: server_parameters (mcp StdioServerParameters or dict with url and optional transport),
+        #   trust_remote_code (bool, default False; must be True), structured_output (bool or None).
+        # Outputs: yields a ToolCollection built from the adapter's tools.
+        # Exceptions: ImportError if mcpadapt is missing; ValueError for unsupported transport or untrusted
+        #   code.
+        # Side effects: FutureWarning; mutates a dict server_parameters; starts a background thread /
+        #   subprocess or network connection to the MCP server for the duration of the context.
+        # KNOWN ISSUE: annotated as returning ToolCollection although it is a context manager yielding one;
+        #   the docstring says structured_output defaults to False while the default is None (with a warning).
+        # KNOWN ISSUE: the transport check runs before the trust check, so an untrusted call with a dict can
+        #   still mutate the caller's dict before failing.
         """Automatically load a tool collection from an MCP server.
 
         This method supports Stdio, Streamable HTTP, and legacy HTTP+SSE MCP servers. Look at the `server_parameters`
@@ -1059,6 +1510,25 @@ class ToolCollection:
 
 
 def tool(tool_function: Callable) -> Tool:
+    # [FUNCTION DOC]
+    # Converts a type-hinted, documented function into an instance of a dynamically created Tool subclass
+    #   named SimpleTool. Uses get_json_schema on the function for name, description, inputs (parameters
+    #   properties) and output type (return type); a function without a return hint is allowed only if it has no
+    #   parameters (output type null). output_schema is taken from the schema's output_schema or return schema
+    #   when present. forward becomes a static wrapper of the function with a signature having self prepended.
+    #   It also builds source text for the class and the forward method (decorator lines other than the tool
+    #   decorator kept, body taken from the first body statement onwards) and stores it as __source__ on the
+    #   class and forward.
+    # Inputs: tool_function (callable with type hints and an Args docstring section).
+    # Outputs: a SimpleTool instance (already initialized).
+    # Exceptions: TypeHintParsingException for missing return hint (with parameters) or bad hints/docstring;
+    #   ValueError if no function definition is found or there are multiple tool decorators; validation errors.
+    # Side effects: warns (UserWarning) when other decorators are present; reads the function's source file.
+    # KNOWN ISSUE: since forward source starts at the first body statement, comments placed between the def
+    #   line and the first statement are dropped from the stored source.
+    # KNOWN ISSUE: decorator_lines skips only up to the tool decorator end line, so if other decorators come
+    #   before the tool decorator they are omitted, and only the tool decorator by bare name (not attribute
+    #   access) is detected.
     """
     Convert a function into an instance of a dynamically created Tool subclass.
 
@@ -1078,7 +1548,22 @@ def tool(tool_function: Callable) -> Tool:
             )
 
     class SimpleTool(Tool):
+        # [CLASS DOC]
+        # HELPER: Dynamically created Tool subclass whose class attributes are filled from the function's JSON
+        #   schema.
+        # Inputs: no constructor args.
+        # Key attributes: name, description, inputs, output_type, optional output_schema, forward (static
+        #   wrapper).
+        # Outputs: n/a.
+        # Exceptions: validation errors at construction.
+        # Side effects: none.
         def __init__(self):
+            # [FUNCTION DOC]
+            # HELPER: Marks the tool initialized (no setup needed).
+            # Inputs: self.
+            # Outputs: none.
+            # Exceptions: none raised directly.
+            # Side effects: sets is_initialized to True.
             self.is_initialized = True
 
     # Set the class attributes
@@ -1095,6 +1580,13 @@ def tool(tool_function: Callable) -> Tool:
 
     @wraps(tool_function)
     def wrapped_function(*args, **kwargs):
+        # [FUNCTION DOC]
+        # HELPER: Thin wrapper calling the original function, used as SimpleTool.forward (preserves metadata
+        #   via wraps).
+        # Inputs: any args/kwargs.
+        # Outputs: the original function's return value.
+        # Exceptions: propagates the function's errors.
+        # Side effects: those of the original function.
         return tool_function(*args, **kwargs)
 
     # Bind the copied function to the forward method
@@ -1169,6 +1661,20 @@ def tool(tool_function: Callable) -> Tool:
 
 
 class PipelineTool(Tool):
+    # [CLASS DOC]
+    # Tool base for transformers models: lazily loads a pre-processor, model and post-processor, then runs
+    #   encode, forward (no-grad model call) and decode on each call. Skips forward signature validation.
+    # Inputs (class attributes): model_class, default_checkpoint, pre_processor_class and post_processor_class
+    #   (default AutoProcessor when None). Constructor args: model (checkpoint name or model instance; defaults
+    #   to default_checkpoint), pre_processor (defaults to model), post_processor (defaults to pre_processor at
+    #   setup), device, device_map, model_kwargs (dict), token, hub_kwargs (extra Hub loading kwargs).
+    # Key attributes: model, pre_processor, post_processor, device, device_map, model_kwargs, hub_kwargs.
+    # Outputs: calling returns the decoded outputs.
+    # Exceptions: see constructor/setup/call.
+    # Side effects: model downloads and device moves at setup.
+    # KNOWN ISSUE: the default class attributes inputs (a dict mapping to the str type) and output_type (the
+    #   str type) are not valid per validate_arguments, so instantiating PipelineTool or a subclass that does
+    #   not override them fails validation.
     """
     A [`Tool`] tailored towards Transformer models. On top of the class attributes of the base class [`Tool`], you will
     need to specify:
@@ -1227,6 +1733,15 @@ class PipelineTool(Tool):
         token=None,
         **hub_kwargs,
     ):
+        # [FUNCTION DOC]
+        # Stores model/processor configuration after checking dependencies.
+        # Inputs: model, pre_processor, post_processor, device, device_map, model_kwargs, token (all default
+        #   None), hub_kwargs (extra keyword args).
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if accelerate or torch is unavailable; ValueError if no model and no
+        #   default_checkpoint.
+        # Side effects: sets attributes; adds device_map into model_kwargs when given; adds token into
+        #   hub_kwargs.
         if not _is_package_available("accelerate") or not _is_package_available("torch"):
             raise ModuleNotFoundError(
                 "Please install 'transformers' extra to use a PipelineTool: `pip install 'smolagents[transformers]'`"
@@ -1253,6 +1768,17 @@ class PipelineTool(Tool):
         super().__init__()
 
     def setup(self):
+        # [FUNCTION DOC]
+        # Instantiates processors and model if given as strings (using the class attributes, defaulting
+        #   processors to AutoProcessor), defaults post_processor to pre_processor, determines the device (first
+        #   entry of the model's device map when device_map is set, else accelerate's default device), moves the
+        #   model to the device when no device_map, then marks initialized.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: ImportError for missing transformers/accelerate; loading errors;
+        #   TypeError/AttributeError if model_class is None while model is a string.
+        # Side effects: downloads/loads models, moves model to device, mutates instance and class-processor
+        #   attributes (sets pre_processor_class/post_processor_class on the instance).
         """
         Instantiates the `pre_processor`, `model` and `post_processor` if necessary.
         """
@@ -1289,12 +1815,24 @@ class PipelineTool(Tool):
         super().setup()
 
     def encode(self, raw_inputs):
+        # [FUNCTION DOC]
+        # Applies the pre-processor to raw inputs.
+        # Inputs: raw_inputs (any).
+        # Outputs: the pre-processor output (expected to be a dict-like mapping).
+        # Exceptions: pre-processor errors propagate.
+        # Side effects: none.
         """
         Uses the `pre_processor` to prepare the inputs for the `model`.
         """
         return self.pre_processor(raw_inputs)
 
     def forward(self, inputs):
+        # [FUNCTION DOC]
+        # Runs the model on encoded inputs under torch no-grad.
+        # Inputs: inputs (dict of keyword arguments for the model).
+        # Outputs: the model output.
+        # Exceptions: ImportError if torch is missing; model errors propagate.
+        # Side effects: none beyond computation.
         """
         Sends the inputs through the `model`.
         """
@@ -1304,12 +1842,27 @@ class PipelineTool(Tool):
             return self.model(**inputs)
 
     def decode(self, outputs):
+        # [FUNCTION DOC]
+        # Applies the post-processor to model outputs.
+        # Inputs: outputs (model output).
+        # Outputs: the decoded result.
+        # Exceptions: post-processor errors propagate.
+        # Side effects: none.
         """
         Uses the `post_processor` to decode the model output.
         """
         return self.post_processor(outputs)
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        # [FUNCTION DOC]
+        # Full pipeline call: setup if needed, optional input sanitization, encode, move tensor inputs to the
+        #   device, forward with tensor and non-tensor inputs merged, move outputs to CPU, decode, optional
+        #   output sanitization.
+        # Inputs: args/kwargs for encode; sanitize_inputs_outputs (bool, default False).
+        # Outputs: decoded (optionally sanitized) outputs.
+        # Exceptions: ImportError for torch/accelerate; errors from any stage propagate.
+        # Side effects: device transfers; may trigger setup.
+        # KNOWN ISSUE: unlike Tool.__call__, it does not unpack a single dict argument into kwargs.
         import torch
         from accelerate.utils import send_to_device
 
@@ -1333,6 +1886,15 @@ class PipelineTool(Tool):
 
 
 def get_tools_definition_code(tools: dict[str, Tool]) -> str:
+    # [FUNCTION DOC]
+    # Generates Python source defining the given tools for a remote/sandbox executor: imports for all
+    #   BASE_BUILTIN_MODULES, a minimal Tool stub class (call delegates to forward), then each tool's class
+    #   source (with its smolagents Tool import removed) followed by an instantiation assigned to the tool's
+    #   name.
+    # Inputs: tools (dict mapping name to Tool).
+    # Outputs: str, the combined source.
+    # Exceptions: errors from validate_tool_attributes (imports not checked) or instance_to_source propagate.
+    # Side effects: none.
     tool_codes = []
     for tool in tools.values():
         validate_tool_attributes(tool.__class__, check_imports=False)
@@ -1359,6 +1921,22 @@ def get_tools_definition_code(tools: dict[str, Tool]) -> str:
 
 
 def validate_tool_arguments(tool: Tool, arguments: Any) -> None:
+    # [FUNCTION DOC]
+    # Checks that call arguments match a tool's input schema.
+    # For dict arguments: every key must be an input; each value's JSON type (derived from its Python type)
+    #   must equal the expected type (or be contained in it when the expected type is a list), unless the
+    #   expected type is any, the value is None and the input is nullable, or the value is an integer and the
+    #   expected type is number; every non-nullable input must be present. For non-dict arguments: the value's
+    #   JSON type must equal the first input's type unless that type is any.
+    # Inputs: tool (Tool), arguments (dict or single value).
+    # Outputs: None.
+    # Exceptions: ValueError (unknown argument or missing required argument), TypeError (type mismatch).
+    # Side effects: none.
+    # KNOWN ISSUE: list-typed expected types containing any, or number with an integer value, are not accepted
+    #   in the dict path (those exemptions compare against the whole list); the non-dict path ignores list
+    #   types, nullable and integer-to-number coercion, and raises IndexError for tools with no inputs.
+    # KNOWN ISSUE: nullable inputs may be omitted even when they are required parameters (nullable conflates
+    #   optional and accepts-None).
     """Validate tool arguments against tool's input schema.
 
     Checks that all provided arguments match the tool's expected input types and that
