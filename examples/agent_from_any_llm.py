@@ -1,3 +1,16 @@
+# [MODULE DOC]
+# Example script: shows that the same tool works with any smolagents model backend. A hard-coded string
+#   selects one of five backends (InferenceClientModel on nebius with Llama-3.3-70B, local TransformersModel
+#   SmolLM2-1.7B, LiteLLMModel against a local Ollama server, LiteLLMModel gpt-4o, OpenAIModel gpt-4o), then
+#   runs a ToolCallingAgent and a streaming CodeAgent on a Paris-weather question using the dummy get_weather
+#   tool and prints both answers.
+# Inputs: none (edit chosen_inference in the source); depends on smolagents and credentials/servers of the
+#   chosen backend.
+# Outputs: none (script); prints the chosen model name and both agent answers.
+# Exceptions: any backend/network/auth error propagates and aborts the script.
+# Side effects: runs at import time: network calls to LLM providers (or local model load), console output.
+# KNOWN ISSUE: available_inferences is defined but never used to validate chosen_inference; an unknown value
+#   leaves the model name undefined and causes a NameError when building the agents.
 from smolagents import (
     CodeAgent,
     InferenceClientModel,
@@ -41,6 +54,12 @@ elif chosen_inference == "openai":
 
 @tool
 def get_weather(location: str, celsius: bool | None = False) -> str:
+    # [FUNCTION DOC]
+    # Tool (wrapped by the tool decorator) returning a fixed, fake weather report regardless of input.
+    # Inputs: location (str, ignored), celsius (bool or None, default False, ignored).
+    # Outputs: constant string describing torrential rain and temperatures below -10 degrees C.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Get weather in the next days at given location.
     Secretly this tool does not care about the location, it hates the weather everywhere.

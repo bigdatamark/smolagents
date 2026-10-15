@@ -1,5 +1,16 @@
 # Shamelessly stolen from Microsoft Autogen team: thanks to them for this great resource!
 # https://github.com/microsoft/autogen/blob/gaia_multiagent_v01_march_1st/autogen/browser_utils.py
+# [MODULE DOC]
+# HELPER: Text-based web browser and the smolagents tools that drive it (adapted from Microsoft Autogen). The
+#   browser keeps a history, renders pages/files to markdown via mdconvert, paginates content into viewports,
+#   supports SerpAPI Google search and Ctrl+F style search; each tool returns a header (address, title,
+#   previous-visit note, viewport position) plus the current viewport text.
+# Inputs: depends on requests, pathvalidate, serpapi (GoogleSearch), smolagents.Tool, sibling cookies
+#   (COOKIES) and mdconvert (MarkdownConverter and its exceptions).
+# Outputs: SimpleTextBrowser, SearchInformationTool, VisitTool, DownloadTool, ArchiveSearchTool, PageUpTool,
+#   PageDownTool, FinderTool, FindNextTool.
+# Exceptions: none at import.
+# Side effects: none at import.
 import mimetypes
 import os
 import pathlib
@@ -20,6 +31,19 @@ from .mdconvert import FileConversionException, MarkdownConverter, UnsupportedFo
 
 
 class SimpleTextBrowser:
+    # [CLASS DOC]
+    # Minimal Lynx-like browser for agents. Visiting an address records it in history and loads content:
+    #   "about:blank" is empty, "google: <query>" runs a SerpAPI search, relative addresses are resolved
+    #   against the previous address, other URLs/file URIs are fetched and converted to markdown; non-text
+    #   downloads are saved to downloads_folder and then rendered from the local file.
+    # Inputs: start_page (str or None, default about:blank), viewport_size (int, default 8192 characters per
+    #   viewport), downloads_folder (str or None), serpapi_key (str or None), request_kwargs (dict passed to
+    #   requests.get; must not be None).
+    # Key attributes: history (list of address and timestamp pairs), page_title, viewport_current_page,
+    #   viewport_pages (list of start/end offsets), serpapi_key, request_kwargs (with cookies injected),
+    #   private page content and find state.
+    # Exceptions: see methods.
+    # Side effects: mutates the given request_kwargs dict by adding the module COOKIES.
     """(In preview) An extremely simple text-based web browser comparable to Lynx. Suitable for Agentic use."""
 
     def __init__(
@@ -30,6 +54,16 @@ class SimpleTextBrowser:
         serpapi_key: str | None | None = None,
         request_kwargs: dict[str, Any] | None | None = None,
     ):
+        # [FUNCTION DOC]
+        # Initializes state, navigates to the start page, then stores serpapi_key and request_kwargs (adding
+        #   cookies) and creates the MarkdownConverter.
+        # Inputs: see class doc.
+        # Outputs: none.
+        # Exceptions: TypeError if request_kwargs is None; AttributeError if start_page is anything but
+        #   about:blank (see KNOWN ISSUE).
+        # Side effects: mutates request_kwargs.
+        # KNOWN ISSUE: set_address is called before serpapi_key, request_kwargs and the converter exist, so a
+        #   non-blank start_page fails; request_kwargs None is advertised but crashes.
         self.start_page: str = start_page if start_page else "about:blank"
         self.viewport_size = viewport_size  # Applies only to the standard uri types
         self.downloads_folder = downloads_folder
@@ -49,10 +83,27 @@ class SimpleTextBrowser:
 
     @property
     def address(self) -> str:
+        # [FUNCTION DOC]
+        # Property returning the address of the current page (last history entry).
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: IndexError if history is empty.
+        # Side effects: none.
         """Return the address of the current page."""
         return self.history[-1][0]
 
     def set_address(self, uri_or_path: str, filter_year: int | None = None) -> None:
+        # [FUNCTION DOC]
+        # Navigates to an address: appends it with the current time to history, dispatches on the address kind
+        #   (blank, google search, relative/absolute URL or file URI), then resets to the first viewport.
+        # Inputs: uri_or_path (str), filter_year (int or None; only used for google searches).
+        # Outputs: None.
+        # Exceptions: ValueError if searching without a SerpAPI key; generic Exception when SerpAPI returns no
+        #   organic results key; network errors are mostly converted to error pages by the fetch helper.
+        # Side effects: mutates history, page content, title and viewport; network I/O; file writes for
+        #   downloads.
+        # KNOWN ISSUE: it resets find_on_page_query and find_on_page_viewport, which are not the private
+        #   attributes used by the find methods, so the previous search state is not actually cleared.
         # TODO: Handle anchors
         self.history.append((uri_or_path, time.time()))
 
@@ -80,16 +131,35 @@ class SimpleTextBrowser:
 
     @property
     def viewport(self) -> str:
+        # [FUNCTION DOC]
+        # Property returning the text of the current viewport slice.
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: IndexError if the viewport index is out of range.
+        # Side effects: none.
         """Return the content of the current viewport."""
         bounds = self.viewport_pages[self.viewport_current_page]
         return self.page_content[bounds[0] : bounds[1]]
 
     @property
     def page_content(self) -> str:
+        # [FUNCTION DOC]
+        # Property returning the full text content of the current page.
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """Return the full contents of the current page."""
         return self._page_content
 
     def _set_page_content(self, content: str) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Replaces the page content, recomputes viewport boundaries and clamps the current viewport
+        #   index to the last page.
+        # Inputs: content (str).
+        # Outputs: None.
+        # Exceptions: none raised directly.
+        # Side effects: mutates page content, viewport_pages and viewport_current_page.
         """Sets the text content of the current page."""
         self._page_content = content
         self._split_pages()
@@ -97,12 +167,31 @@ class SimpleTextBrowser:
             self.viewport_current_page = len(self.viewport_pages) - 1
 
     def page_down(self) -> None:
+        # [FUNCTION DOC]
+        # Moves to the next viewport, stopping at the last one.
+        # Inputs: none.
+        # Outputs: None.
+        # Exceptions: none raised directly.
+        # Side effects: mutates viewport_current_page.
         self.viewport_current_page = min(self.viewport_current_page + 1, len(self.viewport_pages) - 1)
 
     def page_up(self) -> None:
+        # [FUNCTION DOC]
+        # Moves to the previous viewport, stopping at the first one.
+        # Inputs: none.
+        # Outputs: None.
+        # Exceptions: none raised directly.
+        # Side effects: mutates viewport_current_page.
         self.viewport_current_page = max(self.viewport_current_page - 1, 0)
 
     def find_on_page(self, query: str) -> str | None:
+        # [FUNCTION DOC]
+        # Searches for the query starting at the current viewport and wrapping around; if the same query is
+        #   repeated while still on the last match, behaves like find_next.
+        # Inputs: query (str; supports star wildcards, matching is case-insensitive on word tokens).
+        # Outputs: the matching viewport text, or None if not found.
+        # Exceptions: none raised directly.
+        # Side effects: stores the query and last match index; moves the current viewport to the match.
         """Searches for the query from the current viewport forward, looping back to the start if necessary."""
 
         # Did we get here via a previous find_on_page search with the same query?
@@ -122,6 +211,12 @@ class SimpleTextBrowser:
             return self.viewport
 
     def find_next(self) -> str | None:
+        # [FUNCTION DOC]
+        # Continues the last search from the viewport after the previous match (wrapping to the start).
+        # Inputs: none.
+        # Outputs: the matching viewport text, or None if no search is active or nothing matches.
+        # Exceptions: none raised directly.
+        # Side effects: updates the last match index and current viewport.
         """Scroll to the next viewport that matches the query"""
 
         if self._find_on_page_query is None:
@@ -145,6 +240,17 @@ class SimpleTextBrowser:
             return self.viewport
 
     def _find_next_viewport(self, query: str, starting_viewport: int) -> int | None:
+        # [FUNCTION DOC]
+        # HELPER: Finds the first viewport index, starting from starting_viewport and wrapping, whose
+        #   word-normalized lowercase text matches the normalized query regex (non-word runs collapsed to
+        #   spaces, star turned into a match-anything pattern merged with the preceding word).
+        # Inputs: query (str or None), starting_viewport (int).
+        # Outputs: viewport index or None (also None for empty/None queries).
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: the normalized query is lowercased but not regex-escaped, and the content is lowercased
+        #   after stripping while the query keeps its surrounding spaces, so some matches near content
+        #   boundaries are missed.
         """Search for matches between the starting viewport looping when reaching the end."""
 
         if query is None:
@@ -175,11 +281,25 @@ class SimpleTextBrowser:
         return None
 
     def visit_page(self, path_or_uri: str, filter_year: int | None = None) -> str:
+        # [FUNCTION DOC]
+        # Navigates to an address and returns the first viewport.
+        # Inputs: path_or_uri (str), filter_year (int or None).
+        # Outputs: viewport text (str).
+        # Exceptions: as set_address.
+        # Side effects: as set_address.
         """Update the address, visit the page, and return the content of the viewport."""
         self.set_address(path_or_uri, filter_year=filter_year)
         return self.viewport
 
     def _split_pages(self) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Computes viewport boundaries: a single viewport for google search results, one empty
+        #   viewport for empty content, otherwise chunks of viewport_size characters each extended to end just
+        #   after whitespace.
+        # Inputs: none (uses current address and content).
+        # Outputs: None.
+        # Exceptions: TypeError if viewport_size is None.
+        # Side effects: replaces viewport_pages.
         # Do not split search results
         if self.address.startswith("google:"):
             self.viewport_pages = [(0, len(self._page_content))]
@@ -202,6 +322,16 @@ class SimpleTextBrowser:
             start_idx = end_idx
 
     def _serpapi_search(self, query: str, filter_year: int | None = None) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Runs a Google search via SerpAPI (optionally restricted to a calendar year) and sets the
+        #   page content to a numbered markdown list of results with title/link, date, source, a
+        #   previous-visit note and snippet.
+        # Inputs: query (str), filter_year (int or None).
+        # Outputs: None.
+        # Exceptions: ValueError if serpapi_key is None; generic Exception when the response has no
+        #   organic_results key.
+        # Side effects: network call; sets page_title and page content (a "no results" message when the list
+        #   is empty).
         if self.serpapi_key is None:
             raise ValueError("Missing SerpAPI key.")
 
@@ -226,6 +356,12 @@ class SimpleTextBrowser:
             return
 
         def _prev_visit(url):
+            # [FUNCTION DOC]
+            # HELPER: Returns a note saying how many seconds ago a URL was last visited, based on history.
+            # Inputs: url (str).
+            # Outputs: note string ending with a newline, or an empty string if never visited.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             for i in range(len(self.history) - 1, -1, -1):
                 if self.history[i][0] == url:
                     return f"You previously visited this page {round(time.time() - self.history[i][1])} seconds ago.\n"
@@ -261,6 +397,20 @@ class SimpleTextBrowser:
         self._set_page_content(content)
 
     def _fetch_page(self, url: str) -> None:
+        # [FUNCTION DOC]
+        # HELPER: Loads a URL. file:// URIs are converted locally; otherwise does a streamed GET with
+        #   request_kwargs: text content types are converted to markdown; anything else is saved to
+        #   downloads_folder under a sanitized (de-duplicated with numeric suffixes, or uuid-based) file name
+        #   and then rendered by navigating to its file URI.
+        # Inputs: url (str).
+        # Outputs: None.
+        # Exceptions: conversion exceptions, missing files and request errors are caught and rendered as
+        #   "Download complete" or "Error ..." pages; other errors propagate (e.g. TypeError when
+        #   downloads_folder is None).
+        # Side effects: network I/O, file writes, history/page state mutation, prints conversion errors.
+        # KNOWN ISSUE: page_title is set to a one-element tuple instead of a string in the download-complete
+        #   handlers; the NameError guard around file naming is ineffective; the HTML error branch passes the
+        #   response object to convert.
         download_path = ""
         try:
             if url.startswith("file://"):
@@ -353,6 +503,13 @@ class SimpleTextBrowser:
                 self._set_page_content(f"## Error\n\n{str(request_exception)}")
 
     def _state(self) -> tuple[str, str]:
+        # [FUNCTION DOC]
+        # HELPER: Builds the header describing the current page (address, title if any, previous-visit note,
+        #   viewport position) and returns it with the current viewport.
+        # Inputs: none.
+        # Outputs: tuple of header string and viewport string.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         header = f"Address: {self.address}\n"
         if self.page_title is not None:
             header += f"Title: {self.page_title}\n"
@@ -371,6 +528,12 @@ class SimpleTextBrowser:
 
 
 class SearchInformationTool(Tool):
+    # [CLASS DOC]
+    # Tool "web_search": runs a Google search through the browser (SerpAPI) and returns results.
+    # Inputs: constructor browser (SimpleTextBrowser). Tool inputs query (str) and optional filter_year.
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "web_search"
     description = "Perform a web search query (think a google search) and returns the search results."
     inputs = {"query": {"type": "string", "description": "The web search query to perform."}}
@@ -382,32 +545,72 @@ class SearchInformationTool(Tool):
     output_type = "string"
 
     def __init__(self, browser):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (SimpleTextBrowser).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self, query: str, filter_year: int | None = None) -> str:
+        # [FUNCTION DOC]
+        # Visits "google: <query>" with the year filter and returns the header, a separator line and the
+        #   results.
+        # Inputs: query (str), filter_year (int or None).
+        # Outputs: str.
+        # Exceptions: browser search errors propagate.
+        # Side effects: network call, browser state change.
+        # KNOWN ISSUE: filter_year is declared as a string input but annotated int; it is interpolated as-is
+        #   so both work.
         self.browser.visit_page(f"google: {query}", filter_year=filter_year)
         header, content = self.browser._state()
         return header.strip() + "\n=======================\n" + content
 
 
 class VisitTool(Tool):
+    # [CLASS DOC]
+    # Tool "visit_page": loads a URL in the browser and returns its first viewport.
+    # Inputs: constructor browser (SimpleTextBrowser, default None but required at call time). Tool input url
+    #   (str).
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "visit_page"
     description = "Visit a webpage at a given URL and return its text. Given a url to a YouTube video, this returns the transcript."
     inputs = {"url": {"type": "string", "description": "The relative or absolute url of the webpage to visit."}}
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self, url: str) -> str:
+        # [FUNCTION DOC]
+        # Visits the URL and returns header, separator and viewport text.
+        # Inputs: url (str, relative or absolute).
+        # Outputs: str.
+        # Exceptions: AttributeError if no browser was given; browser errors propagate.
+        # Side effects: network I/O, browser state change.
         self.browser.visit_page(url)
         header, content = self.browser._state()
         return header.strip() + "\n=======================\n" + content
 
 
 class DownloadTool(Tool):
+    # [CLASS DOC]
+    # Tool "download_file": downloads a binary file (xlsx, pptx, audio, png, docx...) to ./downloads.
+    # Inputs: constructor browser (stored but unused). Tool input url (str).
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "download_file"
     description = """
 Download a file at a given URL. The file should be of this format: [".xlsx", ".pptx", ".wav", ".mp3", ".m4a", ".png", ".docx"]
@@ -417,10 +620,26 @@ DO NOT use this tool for .pdf or .txt or .htm files: for these types of files us
     output_type = "string"
 
     def __init__(self, browser):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser.
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self, url: str) -> str:
+        # [FUNCTION DOC]
+        # Downloads the URL (arxiv "abs" links rewritten to "pdf") and writes it to ./downloads/file<guessed
+        #   extension> (or file.object), overwriting any previous download.
+        # Inputs: url (str).
+        # Outputs: message with the saved path.
+        # Exceptions: generic Exception if the extension is pdf/txt/htm (after the file was written);
+        #   TypeError when no extension can be guessed; I/O error if ./downloads does not exist.
+        # Side effects: network GET, file write.
+        # KNOWN ISSUE: checks membership in a None extension (TypeError instead of the intended path), raises
+        #   only after saving, ignores HTTP error statuses, and replaces every "abs" substring in the URL.
         import requests
 
         if "arxiv" in url:
@@ -443,6 +662,14 @@ DO NOT use this tool for .pdf or .txt or .htm files: for these types of files us
 
 
 class ArchiveSearchTool(Tool):
+    # [CLASS DOC]
+    # Tool "find_archived_url": finds the Wayback Machine snapshot of a URL closest to a date and opens it in
+    #   the browser.
+    # Inputs: constructor browser (SimpleTextBrowser, default None but required). Tool inputs url (str), date
+    #   (str YYYYMMDD).
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "find_archived_url"
     description = "Given a url, searches the Wayback Machine and returns the archived version of the url that's closest in time to the desired date."
     inputs = {
@@ -455,10 +682,25 @@ class ArchiveSearchTool(Tool):
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self, url, date) -> str:
+        # [FUNCTION DOC]
+        # Queries the Wayback availability API with and without the timestamp, prefers the timestamped closest
+        #   snapshot, visits it and returns a line naming the snapshot date followed by header, separator and
+        #   viewport.
+        # Inputs: url (str), date (str YYYYMMDD).
+        # Outputs: str.
+        # Exceptions: generic Exception if no snapshot exists; network/JSON errors propagate.
+        # Side effects: two network GETs (always both), browser navigation, prints the snapshot found.
+        # KNOWN ISSUE: the url is not URL-encoded when inserted into the query string.
         import requests
 
         no_timestamp_url = f"https://archive.org/wayback/available?url={url}"
@@ -486,22 +728,46 @@ class ArchiveSearchTool(Tool):
 
 
 class PageUpTool(Tool):
+    # [CLASS DOC]
+    # Tool "page_up": scrolls the browser up one viewport.
+    # Inputs: constructor browser (default None but required). No tool inputs.
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "page_up"
     description = "Scroll the viewport UP one page-length in the current webpage and return the new viewport content."
     inputs = {}
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self) -> str:
+        # [FUNCTION DOC]
+        # Moves one viewport up and returns header, separator and viewport text.
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: AttributeError if no browser.
+        # Side effects: browser viewport change.
         self.browser.page_up()
         header, content = self.browser._state()
         return header.strip() + "\n=======================\n" + content
 
 
 class PageDownTool(Tool):
+    # [CLASS DOC]
+    # Tool "page_down": scrolls the browser down one viewport.
+    # Inputs: constructor browser (default None but required). No tool inputs.
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "page_down"
     description = (
         "Scroll the viewport DOWN one page-length in the current webpage and return the new viewport content."
@@ -510,16 +776,34 @@ class PageDownTool(Tool):
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self) -> str:
+        # [FUNCTION DOC]
+        # Moves one viewport down and returns header, separator and viewport text.
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: AttributeError if no browser.
+        # Side effects: browser viewport change.
         self.browser.page_down()
         header, content = self.browser._state()
         return header.strip() + "\n=======================\n" + content
 
 
 class FinderTool(Tool):
+    # [CLASS DOC]
+    # Tool "find_on_page_ctrl_f": Ctrl+F search on the current page with star wildcards.
+    # Inputs: constructor browser (default None but required). Tool input search_string (str).
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "find_on_page_ctrl_f"
     description = "Scroll the viewport to the first occurrence of the search string. This is equivalent to Ctrl+F."
     inputs = {
@@ -531,10 +815,23 @@ class FinderTool(Tool):
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self, search_string: str) -> str:
+        # [FUNCTION DOC]
+        # Searches the page; returns header plus the matching viewport, or header plus a not-found message
+        #   naming the string.
+        # Inputs: search_string (str).
+        # Outputs: str.
+        # Exceptions: AttributeError if no browser.
+        # Side effects: browser search state and viewport change.
         find_result = self.browser.find_on_page(search_string)
         header, content = self.browser._state()
 
@@ -548,16 +845,35 @@ class FinderTool(Tool):
 
 
 class FindNextTool(Tool):
+    # [CLASS DOC]
+    # Tool "find_next": jumps to the next match of the last Ctrl+F search.
+    # Inputs: constructor browser (default None but required). No tool inputs.
+    # Key attributes: browser.
+    # Exceptions: see forward.
+    # Side effects: none at construction.
     name = "find_next"
     description = "Scroll the viewport to next occurrence of the search string. This is equivalent to finding the next match in a Ctrl+F search."
     inputs = {}
     output_type = "string"
 
     def __init__(self, browser=None):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the browser.
+        # Inputs: browser (default None).
+        # Outputs: none.
+        # Exceptions: Tool validation errors propagate.
+        # Side effects: none.
         super().__init__()
         self.browser = browser
 
     def forward(self) -> str:
+        # [FUNCTION DOC]
+        # Finds the next match; returns header plus the matching viewport, or header plus a generic not-found
+        #   message.
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: AttributeError if no browser.
+        # Side effects: browser search state and viewport change.
         find_result = self.browser.find_next()
         header, content = self.browser._state()
 

@@ -1,3 +1,12 @@
+# [MODULE DOC]
+# HELPER: Notebook-generation config for the Chinese docs build (consumed by the HF doc-builder tooling).
+# Inputs: none; no imports.
+# Outputs: module globals INSTALL_CONTENT (pip-install snippet for smolagents, English text, with a commented
+#   install-from-source alternative), notebook_first_cells (single code cell with INSTALL_CONTENT prepended to
+#   every generated notebook) and black_avoid_patterns (placeholder-to-fake-name map used during code
+#   formatting).
+# Exceptions: none raised directly.
+# Side effects: none.
 # docstyle-ignore
 INSTALL_CONTENT = """
 # Installation

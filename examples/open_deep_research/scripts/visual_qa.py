@@ -1,3 +1,12 @@
+# [MODULE DOC]
+# HELPER: Visual question-answering tools for Open Deep Research. Provides an idefics2-based path
+#   (VisualQATool via the HF Inference API) and the visualizer tool that calls the OpenAI chat completions API
+#   with gpt-4o.
+# Inputs: env var OPENAI_API_KEY (visualizer); depends on PIL, requests, python-dotenv, huggingface_hub,
+#   transformers (lazily) and smolagents.
+# Outputs: process_images_and_text, encode_image, resize_image, VisualQATool, visualizer.
+# Exceptions: none at import beyond missing dependencies.
+# Side effects: at import, loads .env overriding env vars and creates an InferenceClient as a class attribute.
 import base64
 import json
 import mimetypes
@@ -17,6 +26,14 @@ load_dotenv(override=True)
 
 
 def process_images_and_text(image_path, query, client):
+    # [FUNCTION DOC]
+    # HELPER: Queries idefics2-8b-chatty with an image and text. Builds a chat prompt with the idefics2
+    #   processor template, replaces the image placeholder with a base64 JPEG data URL, and posts a
+    #   text-generation payload (200 new tokens, no full text) to the client.
+    # Inputs: image_path (str local path), query (str), client (huggingface_hub InferenceClient).
+    # Outputs: the first element of the decoded JSON response (a dict with generated_text).
+    # Exceptions: processor download, image, network and JSON errors propagate.
+    # Side effects: downloads the processor from the Hub, reads the image, network POST.
     from transformers import AutoProcessor
 
     messages = [
@@ -35,6 +52,13 @@ def process_images_and_text(image_path, query, client):
 
     # encode images to strings which can be sent to the endpoint
     def encode_local_image(image_path):
+        # [FUNCTION DOC]
+        # HELPER: Loads an image, converts it to RGB JPEG and returns it as a "data:image/jpeg;base64,..."
+        #   string.
+        # Inputs: image_path (str).
+        # Outputs: data-URL string.
+        # Exceptions: PIL errors propagate.
+        # Side effects: reads the file.
         # load image
         image = PIL.Image.open(image_path).convert("RGB")
 
@@ -64,6 +88,13 @@ def process_images_and_text(image_path, query, client):
 
 # Function to encode the image
 def encode_image(image_path):
+    # [FUNCTION DOC]
+    # HELPER: Returns the base64 text of an image file. If the path is an http(s) URL, first downloads it
+    #   (browser user agent, streamed) into downloads/<uuid><guessed extension> and uses that file.
+    # Inputs: image_path (str local path or URL).
+    # Outputs: base64-encoded string of the file bytes.
+    # Exceptions: requests HTTP errors, file I/O errors (including a missing downloads folder) propagate.
+    # Side effects: network GET and file write for URLs; file read.
     if image_path.startswith("http"):
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0"
         request_kwargs = {
@@ -94,6 +125,13 @@ def encode_image(image_path):
 
 
 def resize_image(image_path):
+    # [FUNCTION DOC]
+    # HELPER: Halves an image's width and height and saves it as "resized_" plus the original path.
+    # Inputs: image_path (str).
+    # Outputs: path of the new image.
+    # Exceptions: PIL and I/O errors propagate.
+    # Side effects: writes a new image file.
+    # KNOWN ISSUE: prefixing the whole path breaks for paths with directories (e.g. resized_/tmp/x.png).
     img = PIL.Image.open(image_path)
     width, height = img.size
     img = img.resize((int(width / 2), int(height / 2)))
@@ -103,6 +141,12 @@ def resize_image(image_path):
 
 
 class VisualQATool(Tool):
+    # [CLASS DOC]
+    # Tool "visualizer" backed by idefics2-8b-chatty through the HF Inference API.
+    # Inputs: no constructor args; tool inputs image_path (str) and optional question (str).
+    # Key attributes: client (class-level InferenceClient shared by all instances).
+    # Exceptions: see forward.
+    # Side effects: class attribute creation at import.
     name = "visualizer"
     description = "A tool that can answer questions about attached images."
     inputs = {
@@ -117,6 +161,15 @@ class VisualQATool(Tool):
     client = InferenceClient("HuggingFaceM4/idefics2-8b-chatty")
 
     def forward(self, image_path: str, question: str | None = None) -> str:
+        # [FUNCTION DOC]
+        # Answers a question about an image (or captions it if no question). On failure it prints the error
+        #   and, if the error mentions "Payload Too Large", retries once with a half-size image.
+        # Inputs: image_path (str), question (str or None, default None).
+        # Outputs: the model output (prefixed with a note when no question was given).
+        # Exceptions: errors in the resize retry propagate; other errors are swallowed.
+        # Side effects: network calls, printing, possibly writes a resized image.
+        # KNOWN ISSUE: on non-payload errors the output stays an empty string; on success the output is the
+        #   raw response element (a dict) rather than a string, despite the declared string output type.
         output = ""
         add_note = False
         if not question:
@@ -140,6 +193,17 @@ class VisualQATool(Tool):
 
 @tool
 def visualizer(image_path: str, question: str | None = None) -> str:
+    # [FUNCTION DOC]
+    # Tool: answers a question about a local (or URL) image using OpenAI gpt-4o; with no question, asks for a
+    #   detailed caption and prefixes the answer with a note.
+    # Inputs: image_path (str), question (str or None, default None).
+    # Outputs: answer string.
+    # Exceptions: generic Exception if image_path is not a str or the response lacks choices; network/file
+    #   errors from encoding propagate.
+    # Side effects: reads env OPENAI_API_KEY, network POST to api.openai.com, may download the image.
+    # KNOWN ISSUE: the relative import of encode_image fails when this tool is executed outside the package
+    #   context (e.g. after serialization); mime_type may be None for unknown extensions, producing an invalid
+    #   data URL.
     """A tool that can answer questions about attached images.
 
     Args:

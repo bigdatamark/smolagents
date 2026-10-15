@@ -1,3 +1,13 @@
+# [MODULE DOC]
+# Example script (runnable with uv thanks to its inline script metadata): starts an inline FastMCP weather
+#   server over stdio, connects to it with MCPClient using structured_output so tool results keep their
+#   pydantic schema, and asks a CodeAgent (LiteLLM mistral-small-latest) for Tokyo's temperature in
+#   Fahrenheit.
+# Inputs: Mistral API key for LiteLLM (environment); depends on mcp, pydantic and smolagents with mcp and
+#   litellm extras.
+# Outputs: functions weather_server_script and main.
+# Exceptions: none at import.
+# Side effects: none at import; main spawns a python subprocess and performs network calls.
 # How to run with uv:
 #   uv run structured_output_tool.py
 #
@@ -20,6 +30,14 @@ from smolagents import CodeAgent, InferenceClientModel, LiteLLMModel, MCPClient 
 
 
 def weather_server_script() -> str:
+    # [FUNCTION DOC]
+    # HELPER: Builds the source code of a tiny MCP server.
+    # Inputs: none.
+    # Outputs: dedented Python source string defining a FastMCP "Weather Service" with a get_weather_info tool
+    #   that returns a fixed WeatherInfo (location equals the city, 22.5 C, partly cloudy, 65 percent
+    #   humidity) and runs the server.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Return an inline MCP server script that exposes a weather tool."""
     return dedent(
         '''
@@ -53,6 +71,15 @@ def weather_server_script() -> str:
 
 
 def main() -> None:
+    # [FUNCTION DOC]
+    # Runs the demo: creates the LiteLLM model, launches the inline server as a "python -c" stdio subprocess,
+    #   opens an MCPClient with structured output, builds a CodeAgent with the MCP tools and runs the Tokyo
+    #   Fahrenheit query.
+    # Inputs: none.
+    # Outputs: None (the agent answer is not printed or returned).
+    # Exceptions: MCP connection, model and agent errors propagate.
+    # Side effects: spawns a subprocess (closed when the MCPClient context exits), network calls, agent
+    #   logging.
     # Configure your inference model
     # model = InferenceClientModel()
     model = LiteLLMModel(

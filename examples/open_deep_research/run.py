@@ -1,3 +1,16 @@
+# [MODULE DOC]
+# Open Deep Research CLI: answers one question with a two-level agent team. A manager CodeAgent (visualizer
+#   and text inspector tools, any imports authorized, max 12 steps, planning every 4) delegates web browsing
+#   to a managed ToolCallingAgent "search_agent" (Google search via serper, text-browser navigation tools,
+#   archive search, text inspector; max 20 steps, planning every 4). Both use a LiteLLMModel.
+# Inputs: CLI args (question, --model-id default "o1"); environment variables HF_TOKEN, SERPAPI_API_KEY,
+#   SERPER_API_KEY and the LLM provider key; depends on the local scripts package and smolagents.
+# Outputs: functions parse_args, create_agent, main; globals custom_role_conversions, user_agent,
+#   BROWSER_CONFIG, append_answer_lock.
+# Exceptions: login errors propagate at import.
+# Side effects: at import, loads .env (overriding env vars), logs in to the Hugging Face Hub, creates
+#   ./downloads_folder.
+# KNOWN ISSUE: append_answer_lock is created but never used in this module.
 import argparse
 import os
 import threading
@@ -32,6 +45,12 @@ append_answer_lock = threading.Lock()
 
 
 def parse_args():
+    # [FUNCTION DOC]
+    # HELPER: Parses command-line arguments.
+    # Inputs: sys.argv; positional question (str) and optional --model-id (str, default "o1").
+    # Outputs: argparse Namespace with question and model_id.
+    # Exceptions: SystemExit on invalid arguments or --help.
+    # Side effects: may print usage to stderr.
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "question", type=str, help="for example: 'How many studio albums did Mercedes Sosa release before 2007?'"
@@ -58,6 +77,15 @@ os.makedirs(f"./{BROWSER_CONFIG['downloads_folder']}", exist_ok=True)
 
 
 def create_agent(model_id="o1"):
+    # [FUNCTION DOC]
+    # Builds the manager agent and its managed web-search agent sharing a single LiteLLMModel.
+    # Inputs: model_id (str, default "o1"); for "o1", reasoning_effort is set to "high". max_completion_tokens
+    #   is 8192 and tool-call/tool-response roles are mapped to assistant/user.
+    # Outputs: the manager CodeAgent (with the ToolCallingAgent in managed_agents). The search agent's
+    #   managed-agent task prompt is extended with hints about .txt files, the inspect_file_as_text tool and
+    #   asking for clarification via final_answer.
+    # Exceptions: propagates model/tool construction errors.
+    # Side effects: creates a SimpleTextBrowser (which reads module COOKIES); no network until run.
     model_params = {
         "model_id": model_id,
         "custom_role_conversions": custom_role_conversions,
@@ -112,6 +140,13 @@ def create_agent(model_id="o1"):
 
 
 def main():
+    # [FUNCTION DOC]
+    # CLI entry: parses arguments, creates the agent for the requested model, runs it on the question and
+    #   prints the answer.
+    # Inputs: command-line arguments.
+    # Outputs: None.
+    # Exceptions: agent errors propagate.
+    # Side effects: network calls, console output, possible file downloads into the downloads folder.
     args = parse_args()
 
     agent = create_agent(model_id=args.model_id)

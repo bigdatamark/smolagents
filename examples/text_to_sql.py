@@ -1,3 +1,11 @@
+# [MODULE DOC]
+# Example script: text-to-SQL agent. Creates an in-memory SQLite "receipts" table (receipt_id, customer_name,
+#   price, tip) with four rows, prints its column description, defines the sql_engine tool and asks a
+#   CodeAgent (Llama-3.1-8B-Instruct via InferenceClientModel) which customer had the most expensive receipt.
+# Inputs: none; depends on sqlalchemy and smolagents, HF inference credentials.
+# Outputs: none (script); module globals engine, receipts, table_description, agent.
+# Exceptions: model/network errors propagate.
+# Side effects: at import, creates the in-memory database, prints, network calls.
 from sqlalchemy import (
     Column,
     Float,
@@ -49,6 +57,13 @@ from smolagents import tool
 
 @tool
 def sql_engine(query: str) -> str:
+    # [FUNCTION DOC]
+    # Tool: executes an arbitrary SQL string against the module-level engine and returns the rows as text.
+    # Inputs: query (str, raw SQL; executed without sanitization).
+    # Outputs: concatenation of a newline plus the string form of each row (empty string when there are no
+    #   rows).
+    # Exceptions: SQLAlchemy errors (syntax errors, non-row statements) propagate.
+    # Side effects: reads (or could modify) the in-memory database; statements are not committed.
     """
     Allows you to perform SQL queries on the table. Returns a string representation of the result.
     The table is named 'receipts'. Its description is as follows:

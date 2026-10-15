@@ -1,3 +1,13 @@
+# [MODULE DOC]
+# Example script: defines seven HTTP-API-backed tools with the tool decorator (weather, currency conversion,
+#   news headlines, joke, world time, random fact, Wikipedia summary), builds a streaming CodeAgent with six
+#   of them on a default InferenceClientModel and runs a currency-conversion query.
+# Inputs: none; depends on requests and smolagents; API keys are placeholder strings "your_api_key" in the
+#   source.
+# Outputs: none (script); module globals model, the tool objects and agent.
+# Exceptions: agent/model errors propagate; tool HTTP errors are converted to error strings.
+# Side effects: at import, network calls to the LLM and to whichever APIs the agent invokes.
+# KNOWN ISSUE: get_time_in_timezone is defined but not passed to the agent.
 import requests
 
 # from smolagents.agents import ToolCallingAgent
@@ -14,6 +24,14 @@ model = InferenceClientModel()
 
 @tool
 def get_weather(location: str, celsius: bool | None = False) -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches current weather from the WeatherStack API (plain HTTP) for a location.
+    # Inputs: location (str, city name, inserted unencoded into the URL query), celsius (bool or None, default
+    #   False; selects metric "m" vs Fahrenheit "f" units).
+    # Outputs: sentence with the first weather description and temperature with unit; "Error: <info>" if the
+    #   API JSON contains an error object; "Error fetching weather data: ..." on any requests exception.
+    # Exceptions: request errors are caught; a KeyError/IndexError from an unexpected JSON shape propagates.
+    # Side effects: network GET request.
     """
     Get the current weather at the given location using the WeatherStack API.
 
@@ -50,6 +68,17 @@ def get_weather(location: str, celsius: bool | None = False) -> str:
 
 @tool
 def convert_currency(amount: float, from_currency: str, to_currency: str) -> str:
+    # [FUNCTION DOC]
+    # Tool: converts an amount between currencies using the ExchangeRate-API latest rates for the source
+    #   currency.
+    # Inputs: amount (float), from_currency (str code, e.g. USD), to_currency (str code, e.g. EUR).
+    # Outputs: sentence with the converted amount; an error string if the target rate is missing/zero or the
+    #   request fails.
+    # Exceptions: request errors are caught and returned as strings; a missing "conversion_rates" key raises
+    #   KeyError.
+    # Side effects: network GET request.
+    # KNOWN ISSUE: docstring says RequestException is raised, but the code catches it and returns an error
+    #   string.
     """
     Converts a specified amount from one currency to another using the ExchangeRate-API.
 
@@ -86,6 +115,13 @@ def convert_currency(amount: float, from_currency: str, to_currency: str) -> str
 
 @tool
 def get_news_headlines() -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches US top headlines from NewsAPI and returns up to the first five as "title - source" lines.
+    # Inputs: none.
+    # Outputs: newline-joined headlines; "No news available at the moment." if the list is empty; error string
+    #   on request failure.
+    # Exceptions: request errors caught; missing "articles" key raises KeyError.
+    # Side effects: network GET request.
     """
     Fetches the top news headlines from the News API for the United States.
     This function makes a GET request to the News API to retrieve the top news headlines
@@ -117,6 +153,13 @@ def get_news_headlines() -> str:
 
 @tool
 def get_joke() -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches a random single-type joke from JokeAPI.
+    # Inputs: none.
+    # Outputs: the joke text, or "setup - delivery" for two-part jokes, or an error string if neither form is
+    #   present or the request fails.
+    # Exceptions: request errors caught; none raised directly.
+    # Side effects: network GET request.
     """
     Fetches a random joke from the JokeAPI.
     This function sends a GET request to the JokeAPI to retrieve a random joke.
@@ -146,6 +189,13 @@ def get_joke() -> str:
 
 @tool
 def get_time_in_timezone(location: str) -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches the current datetime for an IANA "Region/City" zone from the World Time API.
+    # Inputs: location (str, e.g. Europe/Paris).
+    # Outputs: sentence containing the raw ISO datetime string, or an error string on request failure.
+    # Exceptions: request errors caught; missing "datetime" key raises KeyError.
+    # Side effects: network GET request.
+    # KNOWN ISSUE: docstring says RequestException is raised, but it is caught and returned as a string.
     """
     Fetches the current time for a given location using the World Time API.
     Args:
@@ -172,6 +222,12 @@ def get_time_in_timezone(location: str) -> str:
 
 @tool
 def get_random_fact() -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches a random English fact from uselessfacts.jsph.pl.
+    # Inputs: none.
+    # Outputs: "Random Fact: <text>", or an error string on request failure.
+    # Exceptions: request errors caught; missing "text" key raises KeyError.
+    # Side effects: network GET request.
     """
     Fetches a random fact from the "uselessfacts.jsph.pl" API.
     Returns:
@@ -193,6 +249,14 @@ def get_random_fact() -> str:
 
 @tool
 def search_wikipedia(query: str) -> str:
+    # [FUNCTION DOC]
+    # Tool: fetches the REST summary of the English Wikipedia page whose title equals the query.
+    # Inputs: query (str, used directly as a page title, not a full-text search).
+    # Outputs: "Summary for <title>: <extract>", or an error string on request failure (including 404 for
+    #   unknown pages).
+    # Exceptions: request errors caught; missing keys raise KeyError.
+    # Side effects: network GET request.
+    # KNOWN ISSUE: docstring says RequestException is raised, but it is caught and returned as a string.
     """
     Fetches a summary of a Wikipedia page for a given query.
     Args:

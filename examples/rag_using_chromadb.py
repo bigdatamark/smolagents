@@ -1,3 +1,13 @@
+# [MODULE DOC]
+# Example script: agentic RAG with semantic search. Loads m-ric/huggingface_doc, splits documents with a
+#   gte-small tokenizer-based splitter (200 tokens, overlap 20), de-duplicates chunks by content, embeds them
+#   with all-MiniLM-L6-v2 into a persistent Chroma store at ./chroma_db, and runs a CodeAgent (LiteLLM groq
+#   gpt-oss-120b, max 4 steps) with RetrieverTool to answer how to push a model to the Hub; prints the answer.
+# Inputs: environment variable GROQ_API_KEY; depends on datasets, langchain, langchain_chroma,
+#   langchain_huggingface, transformers, tqdm, smolagents.
+# Outputs: none (script); defines RetrieverTool and globals such as docs_processed, vector_store, agent.
+# Exceptions: dataset/model/network errors propagate.
+# Side effects: at import, downloads datasets/models, writes ./chroma_db, network calls, console output.
 import os
 
 import datasets
@@ -69,6 +79,13 @@ vector_store = Chroma.from_documents(docs_processed, embeddings, persist_directo
 
 
 class RetrieverTool(Tool):
+    # [CLASS DOC]
+    # Tool named "retriever" performing semantic similarity search over a vector store.
+    # Inputs: constructor vector_store (LangChain vector store, e.g. Chroma), kwargs forwarded to Tool. Class
+    #   attributes define one string input "query" and string output.
+    # Key attributes: vector_store.
+    # Exceptions: see methods.
+    # Side effects: none.
     name = "retriever"
     description = (
         "Uses semantic search to retrieve the parts of documentation that could be most relevant to answer your query."
@@ -82,10 +99,23 @@ class RetrieverTool(Tool):
     output_type = "string"
 
     def __init__(self, vector_store, **kwargs):
+        # [FUNCTION DOC]
+        # Initializes the Tool base and stores the vector store.
+        # Inputs: vector_store, kwargs forwarded to Tool.
+        # Outputs: none.
+        # Exceptions: propagates Tool validation errors.
+        # Side effects: sets self.vector_store.
         super().__init__(**kwargs)
         self.vector_store = vector_store
 
     def forward(self, query: str) -> str:
+        # [FUNCTION DOC]
+        # Retrieves the 3 most similar chunks for the query and formats them.
+        # Inputs: query (str).
+        # Outputs: string starting with "Retrieved documents:" followed by each chunk under a "===== Document
+        #   i =====" header.
+        # Exceptions: AssertionError if query is not a str; vector store errors propagate.
+        # Side effects: computes a query embedding (may run the embedding model).
         assert isinstance(query, str), "Your search query must be a string"
         docs = self.vector_store.similarity_search(query, k=3)
         return "\nRetrieved documents:\n" + "".join(

@@ -1,3 +1,14 @@
+# [MODULE DOC]
+# Example Starlette web app serving a chat page backed by a CodeAgent whose tools come from a remote MCP
+#   server (HF MCP server over streamable HTTP). Routes: GET / (HTML chat UI) and POST /chat (runs the agent
+#   in a worker thread).
+# Inputs: depends on anyio, starlette, smolagents with mcp extra; HF credentials for InferenceClientModel
+#   (Qwen3-Next-80B-A3B-Thinking).
+# Outputs: globals mcp_client, agent, app (debug on, with a shutdown handler).
+# Exceptions: MCP connection errors propagate at import.
+# Side effects: at import, connects to the MCP server over the network.
+# KNOWN ISSUE: a single shared agent is used for all requests, so concurrent chats share and race on the same
+#   agent memory.
 from anyio import to_thread
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse
@@ -22,10 +33,23 @@ agent = CodeAgent(
 
 # Define the shutdown handler to disconnect the MCP client
 async def shutdown():
+    # [FUNCTION DOC]
+    # HELPER: Shutdown handler that disconnects the MCP client.
+    # Inputs: none.
+    # Outputs: None.
+    # Exceptions: propagates disconnect errors.
+    # Side effects: closes the MCP connection.
     mcp_client.disconnect()
 
 
 async def homepage(request):
+    # [FUNCTION DOC]
+    # Handler for GET /: returns a static HTML page with a chat box whose script posts {message} to /chat and
+    #   shows the reply (or the error) in the conversation.
+    # Inputs: request (unused).
+    # Outputs: HTMLResponse.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     return HTMLResponse(
         r"""
 <!DOCTYPE html>
@@ -195,6 +219,14 @@ async def homepage(request):
 
 
 async def chat(request):
+    # [FUNCTION DOC]
+    # Handler for POST /chat: reads JSON, takes the stripped "message" (default empty), runs the shared agent
+    #   on it in a worker thread and returns the stringified result.
+    # Inputs: request with JSON body containing "message".
+    # Outputs: JSONResponse with key "reply".
+    # Exceptions: JSON errors and agent errors propagate (server error response).
+    # Side effects: LLM and MCP tool calls; mutates the shared agent's memory.
+    # KNOWN ISSUE: an empty message is still sent to the agent instead of being rejected.
     data = await request.json()
     message = data.get("message", "").strip()
     # Run in a thread to avoid blocking the event loop

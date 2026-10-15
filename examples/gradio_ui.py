@@ -1,3 +1,12 @@
+# [MODULE DOC]
+# Example script: builds a streaming CodeAgent (WebSearchTool, Llama-3.3-70B via fireworks-ai through
+#   InferenceClientModel, planning every 3 steps, named example_agent) and launches a Gradio chat UI for it
+#   with file uploads saved under ./data.
+# Inputs: none; depends on smolagents with the gradio extra and HF inference credentials.
+# Outputs: none (script); module globals agent.
+# Exceptions: launch/model errors propagate.
+# Side effects: at import, starts a blocking local Gradio web server; files uploaded through the UI are
+#   written to ./data.
 from smolagents import CodeAgent, GradioUI, InferenceClientModel, WebSearchTool
 
 

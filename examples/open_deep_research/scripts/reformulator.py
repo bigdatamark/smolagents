@@ -1,11 +1,31 @@
 # Shamelessly stolen from Microsoft Autogen team: thanks to them for this great resource!
 # https://github.com/microsoft/autogen/blob/gaia_multiagent_v01_march_1st/autogen/browser_utils.py
+# [MODULE DOC]
+# HELPER: Final-answer reformulation for GAIA (adapted from Microsoft Autogen). Exports prepare_response.
+# Inputs: depends on copy and smolagents.models (MessageRole, Model).
+# Outputs: function prepare_response.
+# Exceptions: none at import.
+# Side effects: none at import.
 import copy
 
 from smolagents.models import MessageRole, Model
 
 
 def prepare_response(original_task: str, inner_messages, reformulation_model: Model) -> str:
+    # [FUNCTION DOC]
+    # Asks a model to restate a team transcript as a strictly formatted GAIA final answer. Builds a system
+    #   message with the original task, appends deep copies of every non-empty inner message re-labelled as
+    #   user role, then a user message with GAIA formatting rules (numbers without commas/units, short
+    #   strings, comma lists) and the template "FINAL ANSWER: ...".
+    # Inputs: original_task (str), inner_messages (iterable of ChatMessage-like objects with content and
+    #   role), reformulation_model (smolagents Model, called with the message list).
+    # Outputs: the text after the last "FINAL ANSWER: " in the reply, stripped (whole reply if the marker is
+    #   absent).
+    # Exceptions: model errors propagate; errors while copying messages fall back to one assistant message
+    #   holding the stringified list.
+    # Side effects: one model call; prints the reformulated answer.
+    # KNOWN ISSUE: the fallback message uses a plain string content while other messages use content-part
+    #   lists, and appended copies may be ChatMessage objects mixed with dicts.
     messages = [
         {
             "role": MessageRole.SYSTEM,

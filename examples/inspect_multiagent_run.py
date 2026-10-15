@@ -1,3 +1,14 @@
+# [MODULE DOC]
+# Example script: enables OpenTelemetry tracing to Phoenix (register plus SmolagentsInstrumentor) and runs a
+#   multi-agent setup: a manager CodeAgent delegating to a ToolCallingAgent "search_agent" (web search and
+#   page visit tools), both on an InferenceClientModel via nebius, with full results returned. Prints the
+#   manager's token usage and timing.
+# Inputs: none; depends on openinference-instrumentation-smolagents, arize-phoenix (phoenix.otel), smolagents
+#   and HF credentials; a Phoenix collector should be reachable.
+# Outputs: none (script); module globals model, search_agent, manager_agent, run_result.
+# Exceptions: tracing/model/network errors propagate.
+# Side effects: at import, installs global tracing instrumentation, exports spans, performs network calls and
+#   prints.
 from openinference.instrumentation.smolagents import SmolagentsInstrumentor
 from phoenix.otel import register
 

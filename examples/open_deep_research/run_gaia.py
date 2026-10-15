@@ -1,3 +1,17 @@
+# [MODULE DOC]
+# GAIA benchmark runner for Open Deep Research: downloads the GAIA dataset, skips questions already answered
+#   in the output JSONL, and answers the rest concurrently with a fresh manager/search agent team per
+#   question, appending annotated results to output/<set>/<run-name>.jsonl.
+# Inputs: CLI args (--concurrency default 8, --model-id default "o1", --run-name required, --set-to-run
+#   default "validation", --use-open-models, --use-raw-dataset); env vars HF_TOKEN, SERPAPI_API_KEY,
+#   SERPER_API_KEY and LLM keys; depends on the local scripts package, datasets, pandas, huggingface_hub,
+#   tqdm, smolagents.
+# Outputs: functions parse_args, create_agent_team, load_gaia_dataset, append_answer, answer_single_question,
+#   get_examples_to_answer, main; globals append_answer_lock, custom_role_conversions, BROWSER_CONFIG.
+# Exceptions: login errors propagate at import.
+# Side effects: at import, loads .env (override), logs in to the Hub, prints a VPN warning, creates
+#   ./downloads_folder.
+# KNOWN ISSUE: --use-open-models is parsed (with type bool, so any non-empty string is True) but never used.
 # EXAMPLE COMMAND: from folder examples/open_deep_research, run: python run_gaia.py --concurrency 32 --run-name generate-traces-03-apr-noplanning --model-id gpt-4o
 import argparse
 import json
@@ -47,6 +61,13 @@ append_answer_lock = threading.Lock()
 
 
 def parse_args():
+    # [FUNCTION DOC]
+    # HELPER: Parses the benchmark command-line arguments.
+    # Inputs: sys.argv.
+    # Outputs: argparse Namespace with concurrency, model_id, run_name, set_to_run, use_open_models,
+    #   use_raw_dataset.
+    # Exceptions: SystemExit on invalid/missing arguments (run-name is required).
+    # Side effects: may print usage.
     parser = argparse.ArgumentParser()
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--model-id", type=str, default="o1")
@@ -80,6 +101,15 @@ os.makedirs(f"./{BROWSER_CONFIG['downloads_folder']}", exist_ok=True)
 
 
 def create_agent_team(model: Model, token_counts: TokenUsage):
+    # [FUNCTION DOC]
+    # Builds the manager CodeAgent (visualizer plus a text inspector, max 12 steps, planning every 4, all
+    #   imports allowed) and its managed ToolCallingAgent "search_agent" (serper Google search, browser
+    #   navigation, archive search, text inspector; max 20 steps, planning every 4) on the given model.
+    # Inputs: model (smolagents Model); token_counts (TokenUsage-like accumulator that the search agent's
+    #   token totals are added to when it gives a final answer).
+    # Outputs: the manager CodeAgent.
+    # Exceptions: propagates construction errors.
+    # Side effects: creates a SimpleTextBrowser; registers a final-answer check that mutates token_counts.
     text_limit = 100000
     ti_tool = TextInspectorTool(model, text_limit)
 
@@ -97,6 +127,16 @@ def create_agent_team(model: Model, token_counts: TokenUsage):
     ]
 
     def increment_web_agent_token_counts(final_answer, memory_step, agent):
+        # [FUNCTION DOC]
+        # HELPER: Final-answer check used purely as a hook to add the web agent's total input/output token
+        #   counts into the enclosing token_counts.
+        # Inputs: final_answer (ignored), memory_step (ignored), agent (the search agent).
+        # Outputs: always True (never rejects the answer).
+        # Exceptions: propagates attribute/key errors (see KNOWN ISSUE).
+        # Side effects: mutates the closed-over token_counts.
+        # KNOWN ISSUE: subscripts the monitor result with "input"/"output" keys while writing
+        #   input_tokens/output_tokens attributes; the TokenUsage returned by the monitor is not subscriptable
+        #   and the dict passed by answer_single_question has no such attributes, so this raises.
         token_counts_web = agent.monitor.get_total_token_counts()
         token_counts.input_tokens += token_counts_web["input"]
         token_counts.output_tokens += token_counts_web["output"]
@@ -135,6 +175,15 @@ def create_agent_team(model: Model, token_counts: TokenUsage):
 
 
 def load_gaia_dataset(use_raw_dataset: bool, set_to_run: str) -> datasets.Dataset:
+    # [FUNCTION DOC]
+    # Ensures the GAIA dataset is present in data/gaia (downloading it from the Hub if the folder is missing)
+    #   and loads the requested split via the dataset's GAIA.py loading script with config "2023_all".
+    # Inputs: use_raw_dataset (bool; True downloads gaia-benchmark/GAIA, False the gated
+    #   smolagents/GAIA-annotated); set_to_run (str split name, e.g. "validation" or "test").
+    # Outputs: datasets.Dataset with columns renamed to question, true_answer, task, and non-empty file_name
+    #   values prefixed with data/gaia/<split>/.
+    # Exceptions: Hub/network/auth errors (gated dataset) and dataset loading errors propagate.
+    # Side effects: may download files to data/gaia.
     if not os.path.exists("data/gaia"):
         if use_raw_dataset:
             snapshot_download(
@@ -153,6 +202,12 @@ def load_gaia_dataset(use_raw_dataset: bool, set_to_run: str) -> datasets.Datase
             )
 
     def preprocess_file_paths(row):
+        # [FUNCTION DOC]
+        # HELPER: Map function that prefixes a non-empty file_name with the local split folder path.
+        # Inputs: row (dict-like dataset row).
+        # Outputs: the same row (mutated in place).
+        # Exceptions: none raised directly.
+        # Side effects: mutates row.
         if len(row["file_name"]) > 0:
             row["file_name"] = f"data/gaia/{set_to_run}/" + row["file_name"]
         return row
@@ -170,6 +225,14 @@ def load_gaia_dataset(use_raw_dataset: bool, set_to_run: str) -> datasets.Datase
 
 
 def append_answer(entry: dict, jsonl_file: str) -> None:
+    # [FUNCTION DOC]
+    # HELPER: Appends one JSON record as a line to a JSONL file, thread-safely.
+    # Inputs: entry (dict, must be JSON serializable), jsonl_file (str path).
+    # Outputs: None.
+    # Exceptions: TypeError if entry is not serializable; AssertionError if the file does not exist after
+    #   writing.
+    # Side effects: creates parent directories, writes to the file under the module lock, prints the absolute
+    #   path.
     jsonl_path = Path(jsonl_file)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with append_answer_lock, open(jsonl_file, "a", encoding="utf-8") as fp:
@@ -181,6 +244,26 @@ def append_answer(entry: dict, jsonl_file: str) -> None:
 def answer_single_question(
     example: dict, model_id: str, answers_file: str, visual_inspection_tool: TextInspectorTool
 ) -> None:
+    # [FUNCTION DOC]
+    # Answers one GAIA example end to end and records the result. Builds a LiteLLMModel (o1 gets high
+    #   reasoning effort and 8192 completion tokens, others 4096 max tokens), a text inspector, and an agent
+    #   team; augments the question with an insistent preamble plus descriptions of attached files (zip
+    #   archives are extracted and every file described); runs the agent, reformulates the final answer from
+    #   the memory with prepare_response, detects parsing errors and iteration-limit stops, then appends an
+    #   annotated record to answers_file.
+    # Inputs: example (dict with question, file_name, task, task_id, true_answer), model_id (str),
+    #   answers_file (str path), visual_inspection_tool (tool used to caption images; actually the visualizer
+    #   tool despite the type hint).
+    # Outputs: None.
+    # Exceptions: errors during the agent run are caught and recorded as agent_error; errors in file
+    #   description, token accounting or writing propagate.
+    # Side effects: network calls, possible file extraction/downloads, appends to answers_file, prints; clears
+    #   model_input_messages on every memory step.
+    # KNOWN ISSUE: total_token_counts is a plain dict but input_tokens/output_tokens attributes are
+    #   incremented on it, and the monitor result is subscripted with string keys; this raises
+    #   AttributeError/TypeError after every run.
+    # KNOWN ISSUE: the parsing-error check looks for a substring in message objects, which is likely never
+    #   true.
     model_params: dict[str, Any] = {
         "model_id": model_id,
         "custom_role_conversions": custom_role_conversions,
@@ -273,6 +356,13 @@ Run verification steps if that's needed, you must make sure you find the correct
 
 
 def get_examples_to_answer(answers_file: str, eval_ds: datasets.Dataset) -> list[dict]:
+    # [FUNCTION DOC]
+    # Determines which dataset rows still need answering by reading questions already present in answers_file.
+    # Inputs: answers_file (str JSONL path), eval_ds (datasets.Dataset).
+    # Outputs: list of row dicts whose question is not yet answered and which have a non-empty file_name.
+    # Exceptions: none raised; any error reading the file is printed and treated as no prior answers.
+    # Side effects: reads the file, prints progress.
+    # KNOWN ISSUE: questions without an attached file are silently excluded, so most of GAIA is never run.
     print(f"Loading answers from {answers_file}...")
     try:
         done_questions = pd.read_json(answers_file, lines=True)["question"].tolist()
@@ -285,6 +375,14 @@ def get_examples_to_answer(answers_file: str, eval_ds: datasets.Dataset) -> list
 
 
 def main():
+    # [FUNCTION DOC]
+    # CLI entry: parses args, loads the dataset, prints task counts, computes output/<set>/<run-name>.jsonl,
+    #   and answers remaining questions in a thread pool of the requested concurrency using the visualizer
+    #   tool for images.
+    # Inputs: command-line arguments.
+    # Outputs: None.
+    # Exceptions: the first worker exception propagates when its future result is collected.
+    # Side effects: network calls, file writes, progress bar and console output.
     args = parse_args()
     print(f"Starting run with arguments: {args}")
 

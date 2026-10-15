@@ -1,3 +1,13 @@
+# [MODULE DOC]
+# Example script: human-in-the-loop plan review. A step callback registered for PlanningStep pauses a
+#   CodeAgent (DuckDuckGo search, planning every 5 steps, max 10 steps) after each plan so the user can
+#   approve, edit or cancel it on the console; on cancel it shows memory contents and optionally resumes with
+#   reset disabled.
+# Inputs: interactive stdin; depends on smolagents (CodeAgent, DuckDuckGoSearchTool, InferenceClientModel,
+#   PlanningStep) and HF inference credentials.
+# Outputs: display_plan, get_user_choice, get_modified_plan, interrupt_after_plan, main.
+# Exceptions: none at import.
+# Side effects: none at import; main reads stdin, prints and makes network calls.
 """
 Plan Customization Example
 
@@ -16,6 +26,12 @@ from smolagents import CodeAgent, DuckDuckGoSearchTool, InferenceClientModel, Pl
 
 
 def display_plan(plan_content):
+    # [FUNCTION DOC]
+    # HELPER: Prints the plan between banner lines of equals signs with an "AGENT PLAN CREATED" title.
+    # Inputs: plan_content (str).
+    # Outputs: None.
+    # Exceptions: none raised directly.
+    # Side effects: console output.
     """Display the plan in a formatted way"""
     print("\n" + "=" * 60)
     print("🤖 AGENT PLAN CREATED")
@@ -25,6 +41,12 @@ def display_plan(plan_content):
 
 
 def get_user_choice():
+    # [FUNCTION DOC]
+    # HELPER: Prompts repeatedly until the user enters 1 (approve), 2 (modify) or 3 (cancel).
+    # Inputs: stdin.
+    # Outputs: int 1, 2 or 3.
+    # Exceptions: EOFError/KeyboardInterrupt propagate.
+    # Side effects: reads stdin, prints prompts.
     """Get user's choice for plan approval"""
     while True:
         choice = input("\nChoose an option:\n1. Approve plan\n2. Modify plan\n3. Cancel\nYour choice (1-3): ").strip()
@@ -34,6 +56,13 @@ def get_user_choice():
 
 
 def get_modified_plan(original_plan):
+    # [FUNCTION DOC]
+    # HELPER: Shows the current plan and reads a replacement plan line by line until two consecutive empty
+    #   lines.
+    # Inputs: original_plan (str).
+    # Outputs: the entered text without the two trailing empty lines, or original_plan if the result is blank.
+    # Exceptions: EOFError/KeyboardInterrupt propagate.
+    # Side effects: reads stdin, prints.
     """Allow user to modify the plan"""
     print("\n" + "-" * 40)
     print("MODIFY PLAN")
@@ -60,6 +89,14 @@ def get_modified_plan(original_plan):
 
 
 def interrupt_after_plan(memory_step, agent):
+    # [FUNCTION DOC]
+    # Step callback: for PlanningStep steps, shows the plan and asks the user; approve continues, modify
+    #   replaces the step's plan text in memory, cancel calls agent.interrupt so the run stops. Other step
+    #   types are ignored.
+    # Inputs: memory_step (memory step object), agent (the running agent).
+    # Outputs: None.
+    # Exceptions: propagates input errors.
+    # Side effects: console I/O, mutates memory_step.plan, may set the agent's interrupt flag.
     """
     Step callback that interrupts the agent after a planning step is created.
     This allows for user interaction to review and potentially modify the plan.
@@ -98,6 +135,17 @@ def interrupt_after_plan(memory_step, agent):
 
 
 def main():
+    # [FUNCTION DOC]
+    # Runs the demo task (summarize top 2024 AI breakthroughs) and prints the result. If an exception
+    #   mentioning "interrupted" occurs, prints memory step types and optionally resumes the run without
+    #   resetting memory.
+    # Inputs: stdin.
+    # Outputs: None.
+    # Exceptions: none propagate (all run exceptions are caught).
+    # Side effects: network calls, console I/O.
+    # KNOWN ISSUE: the else clause belongs to the inner try, so after a successful resume it prints "An error
+    #   occurred" and the resumed result is never printed; exceptions not mentioning "interrupted" are
+    #   silently swallowed.
     """Run the complete plan customization example"""
     print("🚀 Starting Plan Customization Example")
     print("=" * 60)

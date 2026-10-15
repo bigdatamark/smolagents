@@ -1,3 +1,15 @@
+# [MODULE DOC]
+# Benchmark runner: evaluates a model (vanilla LLM, CodeAgent or ToolCallingAgent with serper search, webpage
+#   visit and for tool-calling a Python interpreter) on every config of a Hub eval dataset, writing one JSONL
+#   per task under output/ and optionally pushing answers to a Hub dataset.
+# Inputs: CLI args (--date, --eval-dataset default smolagents/benchmark-v1, --model-type LiteLLMModel or
+#   InferenceClientModel, --model-id required, --provider, --agent-action-type code/tool-calling/vanilla,
+#   --parallel-workers default 8, --push-answers-to-hub, --answers-dataset default smolagents/answers); .env
+#   variables (SERPER_API_KEY, LLM keys, HF_TOKEN).
+# Outputs: parse_arguments, load_eval_dataset, serialize_agent_error, append_answer, answer_single_question,
+#   answer_questions; script entry under the main guard.
+# Exceptions: none at import.
+# Side effects: at import, loads .env and creates the output directory.
 import argparse
 import datetime
 import json
@@ -31,6 +43,12 @@ APPEND_ANSWER_LOCK = threading.Lock()
 
 
 def parse_arguments():
+    # [FUNCTION DOC]
+    # HELPER: Parses the benchmark CLI arguments listed in the module doc.
+    # Inputs: sys.argv.
+    # Outputs: argparse Namespace.
+    # Exceptions: SystemExit on invalid arguments.
+    # Side effects: may print usage.
     parser = argparse.ArgumentParser(description="Runs an agent powered by the given model on smolagent benchmark.")
     parser.add_argument(
         "--date",
@@ -89,6 +107,13 @@ def parse_arguments():
 
 
 def load_eval_dataset(eval_dataset):
+    # [FUNCTION DOC]
+    # Loads the test split of every config of the eval dataset into a dict keyed by config name and prints the
+    #   config list and a preview of the simpleqa config.
+    # Inputs: eval_dataset (str Hub dataset id; gated).
+    # Outputs: dict of config name to datasets.Dataset.
+    # Exceptions: Hub/auth errors; KeyError if there is no "simpleqa" config.
+    # Side effects: network downloads, console output.
     # Choose the tasks to evaluate on:
     # tasks = ["gaia"]
     # or evaluate on all tasks: ["gaia", "math", "simpleqa"]
@@ -101,6 +126,14 @@ def load_eval_dataset(eval_dataset):
 
 
 def serialize_agent_error(obj):
+    # [FUNCTION DOC]
+    # HELPER: Serializes an AgentError to a dict with error_type and message, otherwise returns the str of the
+    #   object.
+    # Inputs: obj (any).
+    # Outputs: dict or str.
+    # Exceptions: none raised directly.
+    # Side effects: none.
+    # KNOWN ISSUE: unused in this module.
     if isinstance(obj, AgentError):
         return {"error_type": obj.__class__.__name__, "message": obj.message}
     else:
@@ -108,10 +141,23 @@ def serialize_agent_error(obj):
 
 
 def append_answer(entry: dict, jsonl_file: str) -> None:
+    # [FUNCTION DOC]
+    # HELPER: Thread-safely appends an entry as a JSON line, converting objects with a dict method via that
+    #   method.
+    # Inputs: entry (dict), jsonl_file (str or Path).
+    # Outputs: None.
+    # Exceptions: TypeError for unserializable objects; AssertionError if the file is missing afterwards.
+    # Side effects: creates parent directories, appends to the file under the module lock.
     jsonl_file = Path(jsonl_file)
     jsonl_file.parent.mkdir(parents=True, exist_ok=True)
 
     def convert_to_serializable(obj):
+        # [FUNCTION DOC]
+        # HELPER: JSON default hook calling the object's dict method.
+        # Inputs: obj (any).
+        # Outputs: the dict representation.
+        # Exceptions: TypeError if obj has no dict attribute.
+        # Side effects: none.
         if hasattr(obj, "dict"):
             return obj.dict()
         else:
@@ -123,6 +169,20 @@ def append_answer(entry: dict, jsonl_file: str) -> None:
 
 
 def answer_single_question(example, model, answers_file, action_type):
+    # [FUNCTION DOC]
+    # Answers one example with the chosen action type and appends an annotated record (model id, action type,
+    #   augmented and original question, answer, true answer, source, intermediate steps, start/end time,
+    #   token counts). SimpleQA questions get "Answer with only the final number." appended and MATH questions
+    #   "Write code, not latex.".
+    # Inputs: example (dict with question, true_answer, source), model (smolagents Model with model_id),
+    #   answers_file (str), action_type (str: vanilla, code or tool-calling).
+    # Outputs: None.
+    # Exceptions: run errors are caught (answer becomes the error text, zero token counts); an unknown
+    #   action_type raises UnboundLocalError; write errors propagate.
+    # Side effects: network calls, appends to answers_file, prints errors.
+    # KNOWN ISSUE: start_time is an epoch float while end_time is a formatted date string (the computed float
+    #   end time is overwritten); in vanilla mode the model has no monitor attribute, so every vanilla run is
+    #   recorded as an error; the shared model's token counts are not per-question.
     if action_type == "vanilla":
         agent = model
     elif action_type == "code":
@@ -195,6 +255,16 @@ def answer_questions(
     push_answers_to_hub: bool = False,
     parallel_workers: int = 32,
 ):
+    # [FUNCTION DOC]
+    # Runs all tasks: for each config, derives an output file name from model id, action type, task and date,
+    #   skips questions already present in that file, answers the rest in a thread pool, then optionally
+    #   pushes the file to the Hub answers dataset under a per-model/action/task config and data_dir.
+    # Inputs: eval_ds (dict of task to Dataset), model (Model), date (str or None; defaults to today ISO
+    #   date), action_type (str, default code), output_dir (str, default output), answers_dataset (str or
+    #   None), push_answers_to_hub (bool, default False), parallel_workers (int, default 32).
+    # Outputs: None.
+    # Exceptions: the first worker exception propagates; Hub push errors propagate.
+    # Side effects: file reads/writes, network calls, Hub uploads, console output.
     date = date or datetime.date.today().isoformat()
     model_id = model.model_id
 
