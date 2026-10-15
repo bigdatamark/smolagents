@@ -14,6 +14,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# HELPER: utilities copied from the transformers library for (a) building an OpenAI-style JSON schema of a
+#   Python function from its type hints and Google-style docstring, and (b) statically listing the top-level
+#   packages imported by a code string.
+# Inputs: depends on stdlib inspect, json, re, types, copy, typing; optionally PIL and torch inside
+#   _get_json_schema_type.
+# Outputs: public helpers get_package_name, get_imports, get_json_schema; exceptions TypeHintParsingException
+#   and DocstringParsingException; module-level data IMPORT_TO_PACKAGE_MAPPING (import name -> pip package
+#   name), compiled regexes description_re, args_re, args_split_re, returns_re used to split docstrings, and
+#   _BASE_TYPE_MAPPING (Python type -> JSON schema fragment).
+# Exceptions: none raised at import time.
+# Side effects: none at import time (regex compilation only).
 """This module contains utilities exclusively taken from `transformers` repository.
 
 Since they are not specific to `transformers` and that `transformers` is an heavy dependencies, those helpers have
@@ -44,6 +56,12 @@ IMPORT_TO_PACKAGE_MAPPING = {
 
 
 def get_package_name(import_name: str) -> str:
+    # [FUNCTION DOC]
+    # HELPER: maps a Python import name to the pip package name that provides it.
+    # Inputs: import_name (str).
+    # Outputs: the mapped package name from the import-to-package mapping, or the import name unchanged.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Return the package name for a given import name.
 
@@ -57,6 +75,20 @@ def get_package_name(import_name: str) -> str:
 
 
 def get_imports(code: str) -> list[str]:
+    # [FUNCTION DOC]
+    # What: regex-based static scan of source code for imported top-level packages. First strips everything
+    #   from each 'try:' up to the end of the following 'except ...:' header (so imports inside try blocks are
+    #   skipped), and removes imports guarded by an 'if is_flash_attn..._available():' block. Then collects
+    #   names from whole-line 'import X' / 'import X as Y' statements and from 'from X import ...' statements,
+    #   drops relative imports (leading dot), keeps the first dotted component, de-duplicates, and maps each
+    #   through get_package_name.
+    # Inputs: code (str, Python source).
+    # Outputs: list of package name strings in arbitrary order (built from a set).
+    # Exceptions: none raised directly.
+    # Side effects: none.
+    # KNOWN ISSUE: 'import a, b' lines are not matched (the regex needs a single token to end the line), so
+    #   comma-separated imports are missed; the try/except stripping only removes text up to the except
+    #   header, so imports in the except/else/finally bodies are still counted.
     """
     Extracts all the libraries (not relative imports) that are imported in a code.
 
@@ -87,14 +119,44 @@ def get_imports(code: str) -> list[str]:
 
 
 class TypeHintParsingException(Exception):
+    # [CLASS DOC]
+    # What: exception raised when a function's type hints cannot be converted to a JSON schema (missing hint,
+    #   unsupported construct such as a single-element or variadic tuple).
+    # Inputs: standard Exception arguments.
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Exception raised for errors in parsing type hints to generate JSON schemas"""
 
 
 class DocstringParsingException(Exception):
+    # [CLASS DOC]
+    # What: exception raised when a function's docstring is missing or lacks a description for an argument.
+    # Inputs: standard Exception arguments.
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Exception raised for errors in parsing docstrings to generate JSON schemas"""
 
 
 def get_json_schema(func: Callable) -> dict:
+    # [FUNCTION DOC]
+    # What: builds a tool/function-calling JSON schema for a callable. Reads the cleaned docstring, splits it
+    #   into description, per-argument descriptions and return description, converts type hints to a
+    #   parameters object schema, then attaches each argument's description. A trailing '(choices: [...])' in
+    #   an argument description is parsed as JSON into an 'enum' list (each choice stripped) and removed from
+    #   the description. The return type schema (if a return annotation exists) is moved out of the parameters
+    #   and given the return description when one exists.
+    # Inputs: func (callable with a Google-style docstring and type hints for every parameter).
+    # Outputs: dict with 'type' set to 'function' and 'function' holding 'name' (the function's name),
+    #   'description' (docstring description), 'parameters' (object schema with 'properties' and, if any,
+    #   'required'), and optionally 'return' (schema of the return annotation).
+    # Exceptions: DocstringParsingException if there is no docstring or an argument lacks a description;
+    #   TypeHintParsingException for missing/unsupported type hints; json.JSONDecodeError if a choices block
+    #   is not valid JSON; AttributeError if an enum choice is not a string (strip is called on it).
+    # Side effects: none.
+    # KNOWN ISSUE: the docstring examples print the inner function object only, but the actual return value is
+    #   wrapped in a 'type'/'function' envelope; the examples also import from transformers.utils.
     """
     This function generates a JSON schema for a given function, based on its docstring and type hints. This is
     mostly used for passing lists of tools to a chat template. The JSON schema contains the name and description of
@@ -256,6 +318,19 @@ returns_re = re.compile(
 def _parse_google_format_docstring(
     docstring: str,
 ) -> tuple[str | None, dict | None, str | None]:
+    # [FUNCTION DOC]
+    # HELPER: splits a Google-style docstring into its description, Args block and Returns block using the
+    #   module regexes. Args lines are de-blanked, split into name/description pairs (an optional
+    #   parenthesised type after the name is ignored), and multi-line descriptions are joined with single
+    #   spaces. The Returns regex skips a leading 'type:' prefix if present.
+    # Inputs: docstring (str).
+    # Outputs: tuple of (description or None, dict of argument name -> description, return description or
+    #   None). The dict is empty when there is no Args block.
+    # Exceptions: none raised directly.
+    # Side effects: none.
+    # KNOWN ISSUE: the return annotation says the args dict may be None but it is always a dict; the Returns
+    #   regex type-skipping pattern also swallows any return description that itself contains a colon before
+    #   the first closing parenthesis.
     """
     Parses a Google-style docstring to extract the function description,
     argument descriptions, and return description.
@@ -289,6 +364,20 @@ def _parse_google_format_docstring(
 
 
 def _convert_type_hints_to_json_schema(func: Callable, error_on_missing_type_hints: bool = True) -> dict:
+    # [FUNCTION DOC]
+    # HELPER: converts a function's resolved type hints to a JSON object schema. Every hinted name (including
+    #   'return') is converted with _parse_type_hint. Every signature parameter must have an annotation when
+    #   error_on_missing_type_hints is true; unhinted parameters otherwise get an empty schema. Parameters
+    #   without defaults are listed in 'required'; parameters with any default are marked 'nullable'. If the
+    #   return schema's 'type' is a list (union of basic types) it is replaced by 'any'.
+    # Inputs: func (callable); error_on_missing_type_hints (bool, default True).
+    # Outputs: dict with 'type' 'object', 'properties' (including a 'return' entry when annotated) and
+    #   'required' (only if non-empty).
+    # Exceptions: TypeHintParsingException for missing hints or unparseable types; NameError etc. from
+    #   get_type_hints for unresolvable forward references.
+    # Side effects: none.
+    # KNOWN ISSUE: any parameter with a default is marked nullable even when the default is not None; *args
+    #   and **kwargs are treated like ordinary required parameters.
     type_hints = get_type_hints(func)
     signature = inspect.signature(func)
 
@@ -324,6 +413,20 @@ def _convert_type_hints_to_json_schema(func: Callable, error_on_missing_type_hin
 
 
 def _parse_type_hint(hint: type) -> dict:
+    # [FUNCTION DOC]
+    # HELPER: recursively converts one type hint to a JSON schema fragment. Non-generic types go through
+    #   _get_json_schema_type; Union / X|Y go through _parse_union_type; list[T] -> array with items; bare
+    #   tuple -> array, tuple of several types -> array with prefixItems; dict[K, V] -> object with
+    #   additionalProperties from V (bare dict -> object); Literal[...] -> union of the literal values' types
+    #   plus an 'enum' of the non-None values.
+    # Inputs: hint (a type or typing construct).
+    # Outputs: dict JSON schema fragment.
+    # Exceptions: TypeHintParsingException for single-element tuples, tuples containing Ellipsis, and any
+    #   other generic origin (e.g. set, Callable).
+    # Side effects: none.
+    # KNOWN ISSUE: the KeyError handler around _get_json_schema_type is dead code (that function never raises
+    #   KeyError; unknown classes silently become 'object'), and the exception is built with the hint as a
+    #   second argument, so its message is a tuple rather than a formatted string.
     origin = get_origin(hint)
     args = get_args(hint)
 
@@ -385,6 +488,17 @@ def _parse_type_hint(hint: type) -> dict:
 
 
 def _parse_union_type(args: tuple[Any, ...]) -> dict:
+    # [FUNCTION DOC]
+    # HELPER: converts the members of a union to a schema. NoneType members are excluded from the conversion.
+    #   One remaining member -> its schema directly; all members with string 'type' -> a 'type' list sorted
+    #   alphabetically; otherwise -> 'anyOf' list of schemas. Adds 'nullable' true if NoneType was a member.
+    # Inputs: args (iterable of types; a tuple from get_args or a set of literal value types).
+    # Outputs: dict schema fragment.
+    # Exceptions: TypeHintParsingException propagates from member conversion; KeyError if a member schema has
+    #   no 'type' key (e.g. a nested anyOf) in the all-basic check.
+    # Side effects: none.
+    # KNOWN ISSUE: a union of only None (e.g. Literal[None]) yields an empty 'type' list; a nested union
+    #   member without a 'type' key raises KeyError instead of falling back to anyOf.
     subtypes = [_parse_type_hint(t) for t in args if t is not type(None)]
     if len(subtypes) == 1:
         # A single non-null type can be expressed directly
@@ -413,6 +527,17 @@ _BASE_TYPE_MAPPING = {
 
 
 def _get_json_schema_type(param_type: type) -> dict[str, str]:
+    # [FUNCTION DOC]
+    # HELPER: maps a non-generic type to a JSON schema fragment: int/float/str/bool/list/dict/Any/NoneType via
+    #   the base mapping (returned as a shallow copy), PIL Image -> 'image', torch Tensor -> 'audio',
+    #   everything else -> 'object'.
+    # Inputs: param_type (type).
+    # Outputs: dict with a 'type' key.
+    # Exceptions: ImportError if the Image branch is reached without PIL installed.
+    # Side effects: may import PIL or torch.
+    # KNOWN ISSUE: the Image and Tensor branches compare the string form of the type to 'Image' / 'Tensor',
+    #   but the string form of a class is like "<class 'PIL.Image.Image'>", so those branches never match and
+    #   such types are reported as 'object'. Mapping Tensor to 'audio' is also questionable.
     if param_type in _BASE_TYPE_MAPPING:
         return copy(_BASE_TYPE_MAPPING[param_type])
     if str(param_type) == "Image":

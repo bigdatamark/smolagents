@@ -14,6 +14,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# What: safe (JSON-based) serialization layer used to pass values between the local agent process and remote
+#   executors / sandboxes. Values are converted to a JSON-compatible tree in which non-JSON types are encoded
+#   as dicts carrying a '__type__' marker; the JSON text is prefixed with 'safe:'. An opt-in insecure fallback
+#   encodes values with pickle + base64 under a 'pickle:' prefix. Legacy unprefixed strings are treated as
+#   base64 pickle. The module can also emit standalone Python source for a deserializer to be injected into a
+#   remote interpreter.
+# Inputs: depends on stdlib base64, json, pickle, io.BytesIO, typing.Any; lazily imports datetime, decimal,
+#   pathlib, dataclasses, inspect, textwrap, warnings, and optionally numpy and PIL (when present).
+# Outputs: exports SerializationError and SafeSerializer (listed in the module export list).
+# Exceptions: none raised at import time.
+# Side effects: none at import time (only class definitions).
 
 """
 Safe serialization module for remote executor communication.
@@ -37,12 +49,36 @@ __all__ = ["SerializationError", "SafeSerializer"]
 
 
 class SerializationError(Exception):
+    # [CLASS DOC]
+    # What: exception type signalling that a value cannot be serialized (safe mode refusal, or pickle failure)
+    #   or that pickle data was rejected during deserialization.
+    # Inputs: standard Exception constructor arguments (typically a message string).
+    # Outputs: n/a (exception class, no extra attributes).
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Raised when a type cannot be safely serialized."""
 
     pass
 
 
 class SafeSerializer:
+    # [CLASS DOC]
+    # What: namespace class (all members static/class methods, never instantiated in practice) implementing
+    #   safe serialization. Encoding: primitives (exact str/int/float/bool/None) pass through; list -> JSON
+    #   list; dict with only exact-str keys -> JSON object; other dicts -> marker 'dict_with_complex_keys'
+    #   with a list of [key, value] pairs; tuple/set/frozenset -> marker with 'data' list; bytes -> base64
+    #   text; complex -> real/imag; datetime/date/time -> ISO text; timedelta -> total_seconds; Decimal ->
+    #   string; pathlib paths -> string under marker 'Path'; PIL images -> PNG bytes in base64; numpy ndarray
+    #   -> nested list plus dtype string; numpy integer/floating scalars -> plain Python number; dataclass
+    #   instances -> class name, module and recursively encoded fields. Anything else is refused.
+    # Inputs: no constructor arguments. Class attributes: SAFE_PREFIX (the text 'safe:'), and
+    #   _optional_types_cache (class-level dict shared by all callers mapping 'module.attr' to the imported
+    #   class or None when unavailable).
+    # Outputs: n/a (class).
+    # Exceptions: methods raise SerializationError as described on each method.
+    # Side effects: _optional_types_cache is mutated lazily and shared process-wide.
+    # KNOWN ISSUE: user dicts whose own keys include '__type__' with a recognised marker value (e.g. 'bytes')
+    #   are indistinguishable from encoded values and are decoded as that type on the way back (no escaping).
     """JSON-based serializer with type markers for safe serialization.
 
     Supports:
@@ -62,6 +98,14 @@ class SafeSerializer:
 
     @classmethod
     def _get_optional_type(cls, module: str, attr: str):
+        # [FUNCTION DOC]
+        # HELPER: lazily imports an optional class (e.g. PIL Image or numpy ndarray) and memoizes the result.
+        # Inputs: module (str, dotted module name), attr (str, attribute name inside that module).
+        # Outputs: the attribute (usually a class) or None if the module cannot be imported or lacks the
+        #   attribute.
+        # Exceptions: none raised directly (ImportError/AttributeError are swallowed and cached as None).
+        # Side effects: imports the module on first lookup; writes the result into the class-level cache keyed
+        #   by 'module.attr'. Not lock-protected, but races only cause duplicate imports.
         """Get optional type class with caching to avoid repeated imports."""
         key = f"{module}.{attr}"
         if key not in cls._optional_types_cache:
@@ -74,6 +118,28 @@ class SafeSerializer:
 
     @staticmethod
     def to_json_safe(obj: Any) -> Any:
+        # [FUNCTION DOC]
+        # What: recursively converts a Python value to a JSON-serializable tree with '__type__' markers (see
+        #   the class doc for the per-type encodings). Type checks are exact type identity for builtins (so
+        #   subclasses of str/int/list/dict etc. are not accepted by those branches);
+        #   datetime/Decimal/pathlib/numpy are recognised by the type's module and name without importing; PIL
+        #   is checked via isinstance on the cached class; dataclass instances (not dataclass types) are
+        #   handled last.
+        # Inputs: obj (any value).
+        # Outputs: a JSON-compatible value: primitive, list, or dict (plain dict for str-keyed dicts, marker
+        #   dict otherwise). Floats such as inf/nan are passed through (json module later writes them as
+        #   non-standard tokens).
+        # Exceptions: SerializationError ('Cannot safely serialize object of type <name>') for unsupported
+        #   types anywhere in the tree; errors from PIL save propagate; RecursionError on self-referencing
+        #   structures.
+        # Side effects: may import PIL / numpy through the optional-type cache; imports dataclasses.
+        # KNOWN ISSUE: numpy bool scalars, complex scalars and other numpy scalar kinds are not handled and
+        #   raise; complex-dtype ndarrays produce complex numbers in the list output which json.dumps cannot
+        #   encode.
+        # KNOWN ISSUE: a set/frozenset whose elements encode to dicts (e.g. tuples) round-trips fine, but sets
+        #   containing unhashable decoded values (dataclasses become dicts) would fail on decode.
+        # KNOWN ISSUE: any pathlib type whose name contains 'Path' (including PurePosixPath/PureWindowsPath)
+        #   is encoded as 'Path' and decodes to a concrete Path, so the original class is not preserved.
         """Convert Python objects to JSON-serializable format with type markers.
 
         Args:
@@ -172,6 +238,23 @@ class SafeSerializer:
 
     @staticmethod
     def from_json_safe(obj: Any) -> Any:
+        # [FUNCTION DOC]
+        # What: inverse of to_json_safe. For a dict carrying a recognised '__type__' marker it rebuilds bytes,
+        #   PIL image (opened from PNG bytes), set, tuple, complex, frozenset, dict with complex keys,
+        #   datetime, date, time, timedelta, Decimal, Path, numpy ndarray (with dtype), or a dataclass
+        #   stand-in; dicts without a recognised marker are decoded value-by-value as plain dicts (so unknown
+        #   markers are kept as data); lists are decoded element-wise; anything else is returned unchanged.
+        # Inputs: obj (JSON-decoded value).
+        # Outputs: the reconstructed Python value. Dataclasses come back as a plain dict with keys
+        #   '__dataclass__' (class name), '__module__' and the decoded fields. If PIL is not installed an
+        #   image is returned as its marker dict; if numpy is not installed an ndarray is returned as a nested
+        #   list.
+        # Exceptions: KeyError for marker dicts missing required fields; binascii.Error / ValueError for bad
+        #   base64, ISO strings or Decimal text; PIL errors for invalid image bytes; TypeError when set
+        #   elements decode to unhashable values.
+        # Side effects: lazily imports datetime, decimal, pathlib, PIL, numpy as needed.
+        # Note: its source text is reused verbatim (via inspect) by get_safe_serializer_code and
+        #   get_deserializer_code, so it must remain self-contained.
         """
         Convert JSON-safe format back to Python objects.
 
@@ -250,6 +333,16 @@ class SafeSerializer:
 
     @staticmethod
     def dumps(obj: Any, allow_pickle: bool = False) -> str:
+        # [FUNCTION DOC]
+        # What: serializes a value to a prefixed string. With pickle disallowed it always uses the safe JSON
+        #   encoding. With pickle allowed it tries the safe encoding first and, only if that raises
+        #   SerializationError, emits a FutureWarning and falls back to base64-encoded pickle.
+        # Inputs: obj (any value); allow_pickle (bool, default False).
+        # Outputs: str, either 'safe:' followed by JSON text, or 'pickle:' followed by base64 pickle bytes.
+        # Exceptions: SerializationError when safe encoding fails and pickle is disallowed, or when pickling
+        #   fails (PicklingError/TypeError/AttributeError are wrapped). json.dumps errors (e.g. TypeError for
+        #   complex values inside ndarray lists) propagate unwrapped and do not trigger the pickle fallback.
+        # Side effects: emits a FutureWarning (stacklevel 2) on pickle fallback.
         """
         Serialize object to string.
 
@@ -293,6 +386,17 @@ class SafeSerializer:
 
     @staticmethod
     def loads(data: str, allow_pickle: bool = False) -> Any:
+        # [FUNCTION DOC]
+        # What: deserializes a string produced by dumps, dispatching on the prefix: 'safe:' -> JSON parse then
+        #   from_json_safe; 'pickle:' -> base64-decode then unpickle (only if allowed); no recognised prefix
+        #   -> treated as legacy base64 pickle (only if allowed).
+        # Inputs: data (str); allow_pickle (bool, default False).
+        # Outputs: the deserialized Python value.
+        # Exceptions: SerializationError ('Pickle data rejected ...') for pickle or legacy data when pickle is
+        #   disallowed; json.JSONDecodeError for malformed safe payloads; base64/pickle errors propagate;
+        #   AttributeError if data is not a string.
+        # Side effects: emits a FutureWarning (stacklevel 2) whenever pickle data is deserialized; unpickling
+        #   can execute arbitrary code from the payload.
         """
         Deserialize string with format detection.
 
@@ -347,6 +451,19 @@ class SafeSerializer:
 
     @staticmethod
     def _extract_method_body(method) -> str:
+        # [FUNCTION DOC]
+        # HELPER: returns the source of a function's body (without the def line and docstring), dedented.
+        #   Scans lines after the first: if a line contains a triple double-quote, the body starts after the
+        #   line closing that docstring; otherwise the first non-blank line that does not start with 'def ' or
+        #   '@' is taken as the body start.
+        # Inputs: method (function object whose source is retrievable).
+        # Outputs: str, the dedented body source.
+        # Exceptions: OSError/TypeError from inspect.getsource if source is unavailable.
+        # Side effects: reads source files via inspect.
+        # KNOWN ISSUE: unused anywhere in the code base. The heuristic is fragile: comment lines, multi-line
+        #   signatures or single-quoted docstrings are treated as the start of the body, and triple quotes
+        #   inside code are mistaken for a docstring. If no body line is found the whole source (including
+        #   def) is returned.
         """Extract method body without the def line and dedent it."""
         import inspect
         import textwrap
@@ -375,6 +492,21 @@ class SafeSerializer:
 
     @staticmethod
     def get_safe_serializer_code() -> str:
+        # [FUNCTION DOC]
+        # What: intended to return standalone Python source defining SerializationError and a sandbox
+        #   SafeSerializer class, built by splicing the source of to_json_safe and from_json_safe (with the
+        #   staticmethod decorator and class-qualified recursive calls stripped) into a template that also
+        #   defines simplified dumps/loads (no warnings, short rejection messages).
+        # Inputs: none.
+        # Outputs: str of Python source.
+        # Exceptions: OSError/TypeError from inspect.getsource if source is unavailable.
+        # Side effects: reads source via inspect.
+        # KNOWN ISSUE: the generated code does not compile. The spliced method sources keep their original
+        #   4-space indentation and are inserted after another 4 spaces, so each def line ends up at the same
+        #   indentation as its body (IndentationError when executed). Even if re-indented, the methods lose
+        #   the staticmethod decorator and call to_json_safe / from_json_safe as bare names, which are not
+        #   defined at module level. The method is not used anywhere in the code base (remote executors use
+        #   get_deserializer_code).
         """
         Returns the SafeSerializer class definition as string for injection into sandbox.
 
@@ -450,6 +582,19 @@ class SafeSerializer:
 
     @staticmethod
     def get_deserializer_code(allow_pickle: bool) -> str:
+        # [FUNCTION DOC]
+        # What: builds standalone Python source for a remote interpreter defining SerializationError, a
+        #   module-level _from_json_safe function (the dedented source of from_json_safe with the decorator
+        #   removed, renamed, and its recursive calls rewritten), and a _deserialize function. _deserialize
+        #   decodes 'safe:' strings via JSON plus _from_json_safe; for 'pickle:' strings and for any other
+        #   value (legacy) it either unpickles base64 data or raises SerializationError, depending on the flag
+        #   baked in at generation time.
+        # Inputs: allow_pickle (bool) - whether the generated code accepts pickle payloads.
+        # Outputs: str of Python source (lines joined by newlines, ending with a blank line).
+        # Exceptions: OSError/TypeError from inspect.getsource if source is unavailable.
+        # Side effects: reads source via inspect. Used by remote_executors to inject the deserializer.
+        # KNOWN ISSUE: the generated _deserialize emits no warning when unpickling, unlike loads, and the
+        #   legacy branch also receives non-string values, which then fail inside base64 decoding.
         """
         Generate deserializer function for remote execution with setting baked in.
 

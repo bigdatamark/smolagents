@@ -14,6 +14,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# What: pytest tests for smolagents.serialization.SafeSerializer: safe-mode refusals, pickle opt-in and legacy
+#   data, round-trips for every supported type, edge cases, malformed input, optional numpy/PIL support,
+#   dataclasses, performance-sized inputs, prefixes, the generated remote deserializer code and thread usage.
+# Inputs: depends on pytest, base64, json, pickle, warnings, datetime, decimal, pathlib, and optionally numpy
+#   and PIL; imports SafeSerializer and SerializationError.
+# Outputs: the module-level PicklableCustomClass helper and Test* classes.
+# Exceptions: assertion failures on regressions.
+# Side effects: one test changes the global decimal context precision.
 
 """
 Comprehensive tests for SafeSerializer covering edge cases, error handling,
@@ -35,20 +44,56 @@ from smolagents.serialization import SafeSerializer, SerializationError
 
 # Module-level class for pickle tests (local classes can't be pickled)
 class PicklableCustomClass:
+    # [CLASS DOC]
+    # HELPER: module-level class (so pickle can locate it) used to exercise the pickle fallback.
+    # Inputs: constructor takes no arguments; attribute value set to 42.
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """A simple class that can be pickled."""
 
     def __init__(self):
+        # [FUNCTION DOC]
+        # HELPER: initialises the instance.
+        # Inputs: none.
+        # Outputs: None.
+        # Exceptions: none raised directly.
+        # Side effects: sets the value attribute to 42.
         self.value = 42
 
 
 class TestSafeSerializationSecurity:
+    # [CLASS DOC]
+    # What: test group - safe mode refuses custom objects and pickle data; pickle path warns.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test that safe mode properly blocks pickle."""
 
     def test_safe_mode_blocks_custom_classes(self):
+        # [FUNCTION DOC]
+        # What: checks dumps in safe mode raises SerializationError for a local custom class instance.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Verify custom classes cannot be serialized in safe mode."""
 
         class CustomClass:
+            # [CLASS DOC]
+            # HELPER: local arbitrary class that the safe serializer cannot encode.
+            # Inputs: no constructor arguments; attribute value set to 42.
+            # Outputs: n/a.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self):
+                # [FUNCTION DOC]
+                # HELPER: initialises the instance.
+                # Inputs: none.
+                # Outputs: None.
+                # Exceptions: none raised directly.
+                # Side effects: sets the value attribute to 42.
                 self.value = 42
 
         obj = CustomClass()
@@ -58,6 +103,12 @@ class TestSafeSerializationSecurity:
             SafeSerializer.dumps(obj, allow_pickle=False)
 
     def test_safe_mode_blocks_pickle_deserialization(self):
+        # [FUNCTION DOC]
+        # What: checks loads in safe mode rejects unprefixed (legacy) pickle data.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Verify pickle data is rejected in safe mode."""
 
         # Create pickle data (no "safe:" prefix)
@@ -68,6 +119,13 @@ class TestSafeSerializationSecurity:
             SafeSerializer.loads(pickle_data, allow_pickle=False)
 
     def test_pickle_fallback_with_warning(self):
+        # [FUNCTION DOC]
+        # What: checks dumps with pickle allowed falls back to pickle with exactly one FutureWarning
+        #   mentioning insecure pickle, and loads with pickle allowed restores the object with one warning.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: records warnings (filter set to always inside the context).
         """Verify pickle fallback works but warns in legacy mode."""
 
         obj = PicklableCustomClass()
@@ -93,9 +151,22 @@ class TestSafeSerializationSecurity:
 
 
 class TestSafeSerializationRoundtrip:
+    # [CLASS DOC]
+    # What: test group - round-trips for supported types.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test that safe types serialize and deserialize correctly."""
 
     def test_primitives(self):
+        # [FUNCTION DOC]
+        # What: round-trips None, bools, an int, a float, a str, bytes and a complex number (also checking the
+        #   'safe:' prefix) through dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test basic Python types."""
         test_cases = [
             None,
@@ -115,6 +186,13 @@ class TestSafeSerializationRoundtrip:
             assert result == obj
 
     def test_collections(self):
+        # [FUNCTION DOC]
+        # What: round-trips a list, a nested str-keyed dict, a tuple, a set and a frozenset through
+        #   dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test collections."""
         test_cases = [
             [1, 2, 3],
@@ -130,6 +208,13 @@ class TestSafeSerializationRoundtrip:
             assert result == obj
 
     def test_datetime_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips the current datetime, its date and time, and a timedelta through dumps/loads in
+        #   safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test datetime module types."""
         now = datetime.now()
         test_cases = [
@@ -145,6 +230,12 @@ class TestSafeSerializationRoundtrip:
             assert result == obj
 
     def test_special_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips a Decimal and a Path through dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test Decimal and Path."""
         test_cases = [
             Decimal("3.14159"),
@@ -157,6 +248,14 @@ class TestSafeSerializationRoundtrip:
             assert result == obj
 
     def test_complex_nested_structure(self):
+        # [FUNCTION DOC]
+        # What: round-trips a nested dict mixing primitives, collections, datetime, Path and bytes and checks
+        #   selected fields.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
+        # KNOWN ISSUE: the nested tuple and set entries are serialized but never asserted.
         """Test deeply nested structures."""
         obj = {
             "primitives": [1, 2.5, "string", None, True],
@@ -183,9 +282,22 @@ class TestSafeSerializationRoundtrip:
 
 
 class TestBackwardCompatibility:
+    # [CLASS DOC]
+    # What: test group - legacy pickle data is still readable when explicitly allowed.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test that legacy pickle data can still be read when explicitly allowed."""
 
     def test_read_legacy_pickle_data(self):
+        # [FUNCTION DOC]
+        # What: checks loads with pickle allowed reads unprefixed base64 pickle data and warns once.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: records warnings.
+        # KNOWN ISSUE: docstring mentions an allow_insecure flag; the actual parameter is allow_pickle.
         """Verify we can read old pickle data when allow_insecure=True."""
 
         # Simulate legacy pickle data (no "safe:" prefix)
@@ -202,6 +314,12 @@ class TestBackwardCompatibility:
             assert "pickle data" in str(w[0].message).lower()
 
     def test_safe_data_is_preferred(self):
+        # [FUNCTION DOC]
+        # What: checks dumps with pickle allowed still uses the safe format (no warning) for safe types.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: records warnings.
         """Verify safe serialization is used even when pickle is allowed."""
 
         # Basic dict should use safe serialization
@@ -217,9 +335,23 @@ class TestBackwardCompatibility:
 
 
 class TestDefaultBehavior:
+    # [CLASS DOC]
+    # What: test group - default arguments are the safe mode.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test that defaults are secure."""
 
     def test_dumps_defaults_to_safe(self):
+        # [FUNCTION DOC]
+        # What: checks dumps/loads without the flag use the safe format and round-trip a dict.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
+        # KNOWN ISSUE: comments mention a safe_serialization parameter that does not exist (it is
+        #   allow_pickle, default False).
         """Verify dumps defaults to safe mode."""
         obj = {"key": "value"}
 
@@ -232,6 +364,13 @@ class TestDefaultBehavior:
         assert result == obj
 
     def test_loads_defaults_to_safe(self):
+        # [FUNCTION DOC]
+        # What: checks loads without the flag reads safe data and rejects unprefixed pickle data.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
+        # KNOWN ISSUE: comments mention a safe_serialization parameter that does not exist.
         """Verify loads defaults to safe mode."""
         # Create safe data
         obj = {"key": "value"}
@@ -250,9 +389,22 @@ class TestDefaultBehavior:
 
 
 class TestEdgeCases:
+    # [CLASS DOC]
+    # What: test group - edge cases and boundary values.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test edge cases and boundary conditions."""
 
     def test_empty_data(self):
+        # [FUNCTION DOC]
+        # What: round-trips empty list, dict, tuple, set, frozenset, str and bytes through dumps/loads in safe
+        #   mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test serialization of empty collections."""
         test_cases = [
             [],
@@ -270,6 +422,13 @@ class TestEdgeCases:
             assert result == obj
 
     def test_nested_empty_structures(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict nesting empty collections through dumps/loads in safe mode and checks
+        #   equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test deeply nested empty structures."""
         obj = {
             "empty_list": [],
@@ -286,6 +445,13 @@ class TestEdgeCases:
         assert result == obj
 
     def test_very_large_numbers(self):
+        # [FUNCTION DOC]
+        # What: round-trips very large ints and floats near the float limits through dumps/loads in safe mode
+        #   and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of very large integers and floats."""
         test_cases = [
             10**100,  # Very large int
@@ -300,6 +466,12 @@ class TestEdgeCases:
             assert result == obj
 
     def test_special_float_values(self):
+        # [FUNCTION DOC]
+        # What: round-trips positive/negative infinity and checks NaN decodes as NaN.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test special float values (infinity, nan)."""
         import math
 
@@ -321,6 +493,13 @@ class TestEdgeCases:
         assert math.isnan(result)
 
     def test_unicode_strings(self):
+        # [FUNCTION DOC]
+        # What: round-trips unicode strings (CJK, emoji, accents, NUL, escapes) through dumps/loads in safe
+        #   mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of various unicode strings."""
         test_cases = [
             "Hello 世界",  # Mixed ASCII and Chinese
@@ -336,6 +515,13 @@ class TestEdgeCases:
             assert result == obj
 
     def test_very_long_strings(self):
+        # [FUNCTION DOC]
+        # What: round-trips a one-million-character string through dumps/loads in safe mode and checks
+        #   equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of very long strings."""
         long_string = "a" * 1_000_000  # 1MB string
 
@@ -344,6 +530,13 @@ class TestEdgeCases:
         assert result == long_string
 
     def test_deeply_nested_structures(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict nested 100 levels deep through dumps/loads in safe mode and checks
+        #   equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test deeply nested data structures."""
         # Create nested structure
         obj = {"level": 0}
@@ -357,6 +550,13 @@ class TestEdgeCases:
         assert result == obj
 
     def test_dict_with_tuple_keys(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict with tuple keys (complex-keys encoding) through dumps/loads in safe mode
+        #   and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test dictionaries with tuple keys."""
         obj = {
             (1, 2): "tuple_key",
@@ -369,6 +569,13 @@ class TestEdgeCases:
         assert result == obj
 
     def test_dict_with_integer_keys(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict with int keys (complex-keys encoding) through dumps/loads in safe mode and
+        #   checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test dictionaries with non-string keys."""
         obj = {
             1: "one",
@@ -381,6 +588,13 @@ class TestEdgeCases:
         assert result == obj
 
     def test_mixed_collection_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict mixing list, tuple, set, frozenset, nested lists and list of tuples and
+        #   compares each field.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test mixed collection types in one structure."""
         obj = {
             "list": [1, 2, 3],
@@ -404,19 +618,43 @@ class TestEdgeCases:
 
 
 class TestErrorHandling:
+    # [CLASS DOC]
+    # What: test group - malformed payloads and unserializable values.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test error handling and malformed data."""
 
     def test_invalid_json_data(self):
+        # [FUNCTION DOC]
+        # What: checks a 'safe:' payload with invalid JSON raises a JSON decode error or SerializationError.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of invalid JSON data."""
         with pytest.raises((json.JSONDecodeError, SerializationError)):
             SafeSerializer.loads("safe:invalid json", allow_pickle=False)
 
     def test_corrupted_safe_prefix(self):
+        # [FUNCTION DOC]
+        # What: checks a 'safe:' payload with truncated JSON raises a JSON decode error or SerializationError.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of data with safe prefix but invalid JSON."""
         with pytest.raises((json.JSONDecodeError, SerializationError)):
             SafeSerializer.loads("safe:{broken", allow_pickle=False)
 
     def test_missing_type_field(self):
+        # [FUNCTION DOC]
+        # What: checks a dict without a type marker decodes as a plain dict.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of malformed type markers."""
         # Valid JSON but missing required fields
         malformed = "safe:" + json.dumps({"data": [1, 2, 3]})  # Missing __type__
@@ -426,6 +664,12 @@ class TestErrorHandling:
         assert result == {"data": [1, 2, 3]}
 
     def test_unknown_type_marker(self):
+        # [FUNCTION DOC]
+        # What: checks an unknown type marker is kept as a plain dict containing the marker key.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of unknown type markers."""
         unknown_type = "safe:" + json.dumps({"__type__": "unknown_type", "data": "something"})
 
@@ -434,6 +678,12 @@ class TestErrorHandling:
         assert "__type__" in result
 
     def test_invalid_base64_in_bytes(self):
+        # [FUNCTION DOC]
+        # What: checks a bytes marker with invalid base64 raises some exception.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test handling of invalid base64 in bytes type."""
         invalid_bytes = "safe:" + json.dumps({"__type__": "bytes", "data": "not-valid-base64!!!"})
 
@@ -441,6 +691,12 @@ class TestErrorHandling:
             SafeSerializer.loads(invalid_bytes, allow_pickle=False)
 
     def test_serialization_of_none_type(self):
+        # [FUNCTION DOC]
+        # What: checks None round-trips to None.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test that None type is handled correctly."""
         obj = None
         serialized = SafeSerializer.dumps(obj, allow_pickle=False)
@@ -448,24 +704,54 @@ class TestErrorHandling:
         assert result is None
 
     def test_serialization_of_function(self):
+        # [FUNCTION DOC]
+        # What: checks a local function cannot be serialized in safe mode.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test that functions cannot be serialized safely."""
 
         def my_function():
+            # [FUNCTION DOC]
+            # HELPER: dummy local function used as an unserializable value.
+            # Inputs: none.
+            # Outputs: None.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             pass
 
         with pytest.raises(SerializationError):
             SafeSerializer.dumps(my_function, allow_pickle=False)
 
     def test_serialization_of_class(self):
+        # [FUNCTION DOC]
+        # What: checks a class object cannot be serialized in safe mode.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test that classes cannot be serialized safely."""
 
         class MyClass:
+            # [CLASS DOC]
+            # HELPER: empty local class used as an unserializable value (the class itself is passed).
+            # Inputs: no constructor arguments.
+            # Outputs: n/a.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             pass
 
         with pytest.raises(SerializationError):
             SafeSerializer.dumps(MyClass, allow_pickle=False)
 
     def test_serialization_of_module(self):
+        # [FUNCTION DOC]
+        # What: checks a module object cannot be serialized in safe mode.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test that modules cannot be serialized safely."""
         import os
 
@@ -474,9 +760,22 @@ class TestErrorHandling:
 
 
 class TestTypeCoverage:
+    # [CLASS DOC]
+    # What: test group - coverage of every supported builtin/stdlib type.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test all supported types comprehensively."""
 
     def test_all_datetime_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips datetime/date/time/timedelta values including min and max bounds through
+        #   dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test all datetime module types."""
         from datetime import date, datetime, time
 
@@ -497,6 +796,14 @@ class TestTypeCoverage:
             assert result == obj
 
     def test_decimal_precision(self):
+        # [FUNCTION DOC]
+        # What: round-trips high-precision Decimals and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: mutates the thread's global decimal context precision.
+        # KNOWN ISSUE: sets the global decimal context precision to 50 and never restores it, leaking state
+        #   into later tests.
         """Test Decimal type with various precisions."""
         from decimal import getcontext
 
@@ -516,6 +823,13 @@ class TestTypeCoverage:
             assert result == obj
 
     def test_pathlib_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips absolute, relative, root, dot, dot-dot and space-containing Paths through
+        #   dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test various Path types."""
 
         test_cases = [
@@ -533,6 +847,12 @@ class TestTypeCoverage:
             assert result == obj
 
     def test_complex_numbers(self):
+        # [FUNCTION DOC]
+        # What: round-trips several complex numbers through dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test complex number handling."""
         test_cases = [
             complex(1, 2),
@@ -549,6 +869,13 @@ class TestTypeCoverage:
             assert result == obj
 
     def test_bytes_types(self):
+        # [FUNCTION DOC]
+        # What: round-trips several bytes values including all 256 byte values and empty bytes through
+        #   dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test various bytes objects."""
         test_cases = [
             b"hello",
@@ -565,9 +892,21 @@ class TestTypeCoverage:
 
 
 class TestNumpySupport:
+    # [CLASS DOC]
+    # What: test group - numpy support (each test skips when numpy is missing).
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test numpy array serialization (optional, skip if not installed)."""
 
     def test_numpy_array(self):
+        # [FUNCTION DOC]
+        # What: round-trips a 2x2 float32 array and checks values and dtype.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test numpy array roundtrip."""
         pytest.importorskip("numpy")
         import numpy as np
@@ -581,6 +920,12 @@ class TestNumpySupport:
         assert result.dtype == arr.dtype
 
     def test_numpy_scalars(self):
+        # [FUNCTION DOC]
+        # What: checks numpy int32/float64 scalars decode to the equivalent Python numbers.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test numpy scalar types."""
         pytest.importorskip("numpy")
         import numpy as np
@@ -596,6 +941,12 @@ class TestNumpySupport:
             assert result == obj.item()
 
     def test_numpy_various_dtypes(self):
+        # [FUNCTION DOC]
+        # What: round-trips 1-D arrays over many integer, float and bool dtypes and checks values and dtype.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test numpy arrays with various dtypes."""
         pytest.importorskip("numpy")
         import numpy as np
@@ -628,6 +979,12 @@ class TestNumpySupport:
         # as they require custom complex number serialization
 
     def test_numpy_multidimensional(self):
+        # [FUNCTION DOC]
+        # What: round-trips 2-D and 3-D arrays and checks values.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test multidimensional numpy arrays."""
         pytest.importorskip("numpy")
         import numpy as np
@@ -645,6 +1002,12 @@ class TestNumpySupport:
             np.testing.assert_array_equal(result, arr)
 
     def test_numpy_empty_array(self):
+        # [FUNCTION DOC]
+        # What: round-trips an empty array and checks values.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test empty numpy array."""
         pytest.importorskip("numpy")
         import numpy as np
@@ -656,9 +1019,21 @@ class TestNumpySupport:
 
 
 class TestPILSupport:
+    # [CLASS DOC]
+    # What: test group - PIL image support (each test skips when PIL is missing).
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test PIL Image serialization (optional, skip if not installed)."""
 
     def test_pil_image(self):
+        # [FUNCTION DOC]
+        # What: round-trips a small RGB image and checks it decodes as an image with the same size and mode.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test PIL Image roundtrip."""
         pytest.importorskip("PIL")
         from PIL import Image
@@ -674,6 +1049,12 @@ class TestPILSupport:
         assert result.mode == img.mode
 
     def test_pil_various_modes(self):
+        # [FUNCTION DOC]
+        # What: round-trips RGB, RGBA, L and 1-bit images and checks mode and size.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test PIL images in various modes."""
         pytest.importorskip("PIL")
         from PIL import Image
@@ -690,6 +1071,12 @@ class TestPILSupport:
             assert result.size == img.size
 
     def test_pil_various_sizes(self):
+        # [FUNCTION DOC]
+        # What: round-trips images of several sizes and checks size.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test PIL images of various sizes."""
         pytest.importorskip("PIL")
         from PIL import Image
@@ -705,14 +1092,32 @@ class TestPILSupport:
 
 
 class TestDataclasses:
+    # [CLASS DOC]
+    # What: test group - dataclass instances decode to dict stand-ins.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test dataclass serialization."""
 
     def test_simple_dataclass(self):
+        # [FUNCTION DOC]
+        # What: serializes a simple dataclass and checks the decoded dict's class-name marker and fields.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test simple dataclass."""
         from dataclasses import dataclass
 
         @dataclass
         class Person:
+            # [CLASS DOC]
+            # HELPER: local dataclass with name (str) and age (int) fields.
+            # Inputs: name (str), age (int).
+            # Outputs: n/a.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             name: str
             age: int
 
@@ -726,16 +1131,34 @@ class TestDataclasses:
         assert result["age"] == 30
 
     def test_nested_dataclass(self):
+        # [FUNCTION DOC]
+        # What: serializes a dataclass containing another dataclass and checks nested decoded fields.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test nested dataclasses."""
         from dataclasses import dataclass
 
         @dataclass
         class Address:
+            # [CLASS DOC]
+            # HELPER: local dataclass with street and city string fields.
+            # Inputs: street (str), city (str).
+            # Outputs: n/a.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             street: str
             city: str
 
         @dataclass
         class Person:
+            # [CLASS DOC]
+            # HELPER: local dataclass with a name and a nested Address.
+            # Inputs: name (str), address (Address).
+            # Outputs: n/a.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             name: str
             address: Address
 
@@ -748,9 +1171,21 @@ class TestDataclasses:
 
 
 class TestPerformance:
+    # [CLASS DOC]
+    # What: test group - larger inputs (functional checks, no timing assertions).
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Performance tests for large data."""
 
     def test_large_list(self):
+        # [FUNCTION DOC]
+        # What: round-trips a 100k-element int list through dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test serialization of large list."""
         large_list = list(range(100_000))
 
@@ -760,6 +1195,12 @@ class TestPerformance:
         assert result == large_list
 
     def test_large_dict(self):
+        # [FUNCTION DOC]
+        # What: round-trips a 10k-entry str-keyed dict through dumps/loads in safe mode and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test serialization of large dictionary."""
         large_dict = {f"key_{i}": i for i in range(10_000)}
 
@@ -769,6 +1210,13 @@ class TestPerformance:
         assert result == large_dict
 
     def test_deeply_nested_performance(self):
+        # [FUNCTION DOC]
+        # What: round-trips a dict nested 100 levels deep.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
+        # KNOWN ISSUE: duplicates test_deeply_nested_structures and does not measure performance.
         """Test performance with deeply nested structures."""
         obj = {"level": 0}
         current = obj
@@ -783,9 +1231,21 @@ class TestPerformance:
 
 
 class TestPrefixHandling:
+    # [CLASS DOC]
+    # What: test group - prefix handling ('safe:', 'pickle:', no prefix).
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test handling of different prefix formats."""
 
     def test_safe_prefix_detection(self):
+        # [FUNCTION DOC]
+        # What: checks safe output carries the 'safe:' prefix and round-trips.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test detection of safe: prefix."""
         obj = {"test": "data"}
         serialized = SafeSerializer.dumps(obj, allow_pickle=False)
@@ -795,6 +1255,12 @@ class TestPrefixHandling:
         assert result == obj
 
     def test_pickle_prefix_with_allow_pickle(self):
+        # [FUNCTION DOC]
+        # What: checks an unencodable object with pickle allowed gets the 'pickle:' prefix and round-trips.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: emits FutureWarnings (not captured).
         """Test pickle: prefix when pickle is allowed."""
         # Create an object that needs pickle
         obj = PicklableCustomClass()
@@ -807,6 +1273,12 @@ class TestPrefixHandling:
         assert result.value == 42
 
     def test_legacy_format_detection(self):
+        # [FUNCTION DOC]
+        # What: checks unprefixed legacy pickle data is accepted with pickle allowed.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: emits a FutureWarning (not captured).
         """Test detection and handling of legacy format (no prefix)."""
         # Simulate legacy pickle data (no prefix)
         legacy_data = {"key": "value"}
@@ -818,9 +1290,24 @@ class TestPrefixHandling:
 
 
 class TestRealWorldScenarios:
+    # [CLASS DOC]
+    # What: test group - realistic payloads.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test real-world usage scenarios."""
 
     def test_agent_variables_scenario(self):
+        # [FUNCTION DOC]
+        # What: serializes a typical agent-variables dict (lists, config, ndarray, image, datetime, scalars)
+        #   and checks the plain fields.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
+        # KNOWN ISSUE: imports numpy and PIL unconditionally (no importorskip), so it errors instead of
+        #   skipping when they are absent; the array, image and timestamp are not asserted.
         """Test typical agent variables scenario."""
         import numpy as np
         from PIL import Image
@@ -849,6 +1336,12 @@ class TestRealWorldScenarios:
         assert result["counter"] == variables["counter"]
 
     def test_final_answer_scenario(self):
+        # [FUNCTION DOC]
+        # What: round-trips several typical final-answer values and checks equality.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: none.
         """Test typical final answer serialization."""
         final_answers = [
             "Simple string answer",
@@ -866,9 +1359,22 @@ class TestRealWorldScenarios:
 
 
 class TestGeneratedDeserializerCode:
+    # [CLASS DOC]
+    # What: test group - code generated by get_deserializer_code for remote executors.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Regression tests for generated deserializer code used by remote executors."""
 
     def test_generated_deserializer_executes_for_safe_payload(self):
+        # [FUNCTION DOC]
+        # What: executes the generated safe-only deserializer and checks it decodes a dict containing a tuple
+        #   and bytes.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: executes generated code into a local namespace.
         code = SafeSerializer.get_deserializer_code(allow_pickle=False)
         namespace = {}
         exec(code, namespace, namespace)
@@ -885,6 +1391,12 @@ class TestGeneratedDeserializerCode:
         assert result == {"count": 3, "items": (1, 2, 3), "raw": b"bytes"}
 
     def test_generated_deserializer_handles_pickle_prefix_when_enabled(self):
+        # [FUNCTION DOC]
+        # What: executes the pickle-enabled generated deserializer and checks it decodes a 'pickle:' payload.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: executes generated code into a local namespace.
         code = SafeSerializer.get_deserializer_code(allow_pickle=True)
         namespace = {}
         exec(code, namespace, namespace)
@@ -895,9 +1407,21 @@ class TestGeneratedDeserializerCode:
 
 
 class TestConcurrency:
+    # [CLASS DOC]
+    # What: test group - use from multiple threads.
+    # Inputs: none (collected by pytest).
+    # Outputs: n/a.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Test thread safety and concurrent access."""
 
     def test_concurrent_serialization(self):
+        # [FUNCTION DOC]
+        # What: runs ten threads that each round-trip a dict and checks all succeed without errors.
+        # Inputs: self.
+        # Outputs: None (pytest test).
+        # Exceptions: AssertionError (or pytest failure) if the behavior regresses.
+        # Side effects: starts and joins ten threads.
         """Test concurrent serialization operations."""
         import threading
 
@@ -905,6 +1429,13 @@ class TestConcurrency:
         errors = []
 
         def serialize_data(data, index):
+            # [FUNCTION DOC]
+            # HELPER: thread target that round-trips data and records the outcome.
+            # Inputs: data (dict to serialize), index (int thread index).
+            # Outputs: None.
+            # Exceptions: none raised directly.
+            # Side effects: appends (index, equality flag) to the enclosing results list, or (index,
+            #   exception) to the errors list.
             try:
                 serialized = SafeSerializer.dumps(data, allow_pickle=False)
                 deserialized = SafeSerializer.loads(serialized, allow_pickle=False)
