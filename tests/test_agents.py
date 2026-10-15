@@ -12,6 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Purpose: pytest suite for smolagents.agents (MultiStepAgent, CodeAgent, ToolCallingAgent, RunResult),
+#   covering runs with scripted fake models, memory/step bookkeeping, planning, final-answer checks,
+#   callbacks, tool/managed-agent validation, serialization (to_dict/from_dict/from_folder/save), streaming
+#   tool calls and multi-agent orchestration.
+# Inputs: depends on smolagents (agents, models, memory, monitoring, tools, default_tools, agent_types,
+#   utils), huggingface_hub chat-completion types, rich Console, pytest and unittest.mock; uses fixtures
+#   shared_datadir, test_tool and get_agent_dict from conftest plus local fixtures agent_logger and
+#   prompt_templates.
+# Outputs: defines fake streaming dataclasses (ChoiceDelta*), scripted fake Model subclasses, mock tool/agent
+#   helpers, test classes TestAgent, TestRunResult, TestMultiStepAgent, TestToolCallingAgent, TestCodeAgent,
+#   TestMultiAgents and module-level tests.
+# Exceptions: none raised at import time beyond import failures of dependencies.
+# Side effects: tests create temp dirs/files, patch registries and clients, capture console output; one test
+#   (test_transformers_toolcalling_agent) downloads and runs a real HF model and test_multiagents_save builds
+#   InferenceClientModel objects (no network calls are made by save).
 import io
 import json
 import os
@@ -79,12 +95,26 @@ from smolagents.utils import (
 
 @dataclass
 class ChoiceDeltaToolCallFunction:
+    # [CLASS DOC]
+    # HELPER: Minimal stand-in for an OpenAI streaming delta tool-call function fragment.
+    # Inputs: arguments (str or None, default None; partial JSON argument text), name (str or None, default
+    #   None; tool name).
+    # Outputs: dataclass instance with those two attributes.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     arguments: Optional[str] = None
     name: Optional[str] = None
 
 
 @dataclass
 class ChoiceDeltaToolCall:
+    # [CLASS DOC]
+    # HELPER: Stand-in for an OpenAI streaming delta tool call.
+    # Inputs: index (int or None; position of the tool call being streamed), id (str or None), function
+    #   (ChoiceDeltaToolCallFunction or None), type (str or None, e.g. "function"); all default None.
+    # Outputs: dataclass instance with those attributes.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     index: Optional[int] = None
     id: Optional[str] = None
     function: Optional[ChoiceDeltaToolCallFunction] = None
@@ -93,6 +123,13 @@ class ChoiceDeltaToolCall:
 
 @dataclass
 class ChoiceDelta:
+    # [CLASS DOC]
+    # HELPER: Stand-in for an OpenAI streaming chunk delta.
+    # Inputs: content, function_call, refusal, role (all str or None) and tool_calls (list of
+    #   ChoiceDeltaToolCall or None); all default None.
+    # Outputs: dataclass instance with those attributes.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     content: Optional[str] = None
     function_call: Optional[str] = None
     refusal: Optional[str] = None
@@ -101,19 +138,51 @@ class ChoiceDelta:
 
 
 def get_new_path(suffix="") -> str:
+    # [FUNCTION DOC]
+    # HELPER: Builds a unique path inside a freshly created temporary directory.
+    # Inputs: suffix (str, default empty; appended to the file name).
+    # Outputs: string path made of a new temp dir plus a random UUID4 name and the suffix; the file itself is
+    #   not created.
+    # Exceptions: OSError propagates if the temp directory cannot be created.
+    # Side effects: creates a new temporary directory on disk that is never cleaned up.
+    # KNOWN ISSUE: unused anywhere in this module, and the temp directory it creates leaks.
     directory = tempfile.mkdtemp()
     return os.path.join(directory, str(uuid.uuid4()) + suffix)
 
 
 @pytest.fixture
 def agent_logger():
+    # [FUNCTION DOC]
+    # HELPER: pytest fixture providing an AgentLogger at DEBUG level whose rich Console records output.
+    # Inputs: none.
+    # Outputs: AgentLogger writing to an in-memory StringIO console (record enabled, no color, not a
+    #   terminal), so tests can call export_text on its console.
+    # Exceptions: none raised directly.
+    # Side effects: none outside the in-memory buffer.
     return AgentLogger(
         LogLevel.DEBUG, console=Console(record=True, no_color=True, force_terminal=False, file=io.StringIO())
     )
 
 
 class FakeToolCallModel(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted Model emulating a tool-calling LLM that first calls python_interpreter then
+    #   final_answer.
+    # Inputs: no constructor args (uses Model defaults).
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, tools_to_call_from=None, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns a canned assistant ChatMessage depending on conversation length.
+        # Inputs: messages (list of messages), tools_to_call_from (ignored, default None), stop_sequences
+        #   (ignored, default None).
+        # Outputs: when fewer than 3 messages, a message with content "I will call the python interpreter."
+        #   and one tool call (id call_0) to python_interpreter with code argument "2*3.6452"; otherwise a
+        #   message "I will return the final answer." with a final_answer tool call (id call_1) and answer
+        #   "7.2904".
+        # Exceptions: none raised directly.
+        # Side effects: none.
         if len(messages) < 3:
             return ChatMessage(
                 role=MessageRole.ASSISTANT,
@@ -143,7 +212,22 @@ class FakeToolCallModel(Model):
 
 
 class FakeToolCallModelImage(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted tool-calling Model that first calls an image generation tool, then returns the stored
+    #   image by state key.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, tools_to_call_from=None, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns canned tool calls for an image-generation flow.
+        # Inputs: messages (list), tools_to_call_from and stop_sequences (ignored, default None).
+        # Outputs: with fewer than 3 messages, an empty-content message calling fake_image_generation_tool
+        #   with prompt "An image of a cat"; otherwise a final_answer call whose arguments are the plain
+        #   string "image.png" (a state variable name).
+        # Exceptions: none raised directly.
+        # Side effects: none.
         if len(messages) < 3:
             return ChatMessage(
                 role=MessageRole.ASSISTANT,
@@ -174,7 +258,21 @@ class FakeToolCallModelImage(Model):
 
 
 class FakeToolCallModelVL(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted tool-calling Model emulating a vision-language flow.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, tools_to_call_from=None, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns canned tool calls for image understanding.
+        # Inputs: messages (list), tools_to_call_from and stop_sequences (ignored).
+        # Outputs: with fewer than 3 messages, a call to fake_image_understanding_tool with prompt "What is in
+        #   this image?" and image "image.png"; otherwise a final_answer call with string argument "The image
+        #   is a cat.".
+        # Exceptions: none raised directly.
+        # Side effects: none.
         if len(messages) < 3:
             return ChatMessage(
                 role=MessageRole.ASSISTANT,
@@ -208,7 +306,24 @@ class FakeToolCallModelVL(Model):
 
 
 class FakeCodeModel(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code-writing Model performing a computation step then a final_answer step.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns a canned CodeAgent-style response chosen by whether a marker already appears in the
+        #   prompt.
+        # Inputs: messages (list; stringified to look for "special_marker"), stop_sequences (ignored).
+        # Outputs: if the marker is absent, a Thought containing "special_marker" and a code block assigning 2
+        #   to the power 3.6452 to result; otherwise a Thought and a code block calling final_answer with
+        #   7.2904.
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: the thought says "multiply" but the code uses exponentiation; the final answer 7.2904
+        #   is hard-coded so tests still pass.
         prompt = str(messages)
         if "special_marker" not in prompt:
             return ChatMessage(
@@ -233,7 +348,20 @@ final_answer(7.2904)
 
 
 class FakeCodeModelImageGeneration(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model that calls image_generation_tool then returns the image via final_answer.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns canned code for image generation keyed on "special_marker" presence.
+        # Inputs: messages (list; stringified), stop_sequences (ignored).
+        # Outputs: first a code block assigning the result of image_generation_tool to image (thought includes
+        #   the marker); afterwards a code block calling final_answer on image.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         prompt = str(messages)
         if "special_marker" not in prompt:
             return ChatMessage(
@@ -258,7 +386,22 @@ final_answer(image)
 
 
 class FakeCodeModelPlanning(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model used to exercise planning steps, reporting token usage of 10 in / 10 out per
+    #   call.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns plan text or code depending on markers present in the prompt.
+        # Inputs: messages (list; stringified), stop_sequences (ignored).
+        # Outputs: if "planning_marker" is absent, a plan "llm plan update planning_marker"; else if
+        #   "action_marker" is absent, a Thought with "action_marker" and a code block computing 2 to the
+        #   power 3.6452; else the plain text "llm plan again". Every reply carries TokenUsage(10, 10).
+        # Exceptions: none raised directly.
+        # Side effects: none.
         prompt = str(messages)
         if "planning_marker" not in prompt:
             return ChatMessage(
@@ -286,7 +429,21 @@ result = 2**3.6452
 
 
 class FakeCodeModelError(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model whose first code step prints "Flag!" and then raises ValueError inside a
+    #   defined function.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns failing code first, then a recovery final answer.
+        # Inputs: messages (list; stringified to look for "special_marker"), stop_sequences (ignored).
+        # Outputs: without the marker, code that prints "Flag!", defines error_function raising
+        #   ValueError("error"), and calls it; with the marker, code calling final_answer with "got an error".
+        # Exceptions: none raised directly.
+        # Side effects: none.
         prompt = str(messages)
         if "special_marker" not in prompt:
             return ChatMessage(
@@ -315,7 +472,20 @@ final_answer("got an error")
 
 
 class FakeCodeModelSyntaxError(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model whose first code step contains an IndentationError.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns syntactically invalid code first, then a final answer.
+        # Inputs: messages (list; stringified), stop_sequences (ignored).
+        # Outputs: without "special_marker", code with an unexpectedly indented print line; with it, code
+        #   calling final_answer with "got an error".
+        # Exceptions: none raised directly.
+        # Side effects: none.
         prompt = str(messages)
         if "special_marker" not in prompt:
             return ChatMessage(
@@ -343,7 +513,19 @@ final_answer("got an error")
 
 
 class FakeCodeModelImport(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model that always imports numpy then calls final_answer.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Always returns code importing numpy as np and calling final_answer with "got an error".
+        # Inputs: messages and stop_sequences (both ignored).
+        # Outputs: a single canned assistant ChatMessage.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         return ChatMessage(
             role=MessageRole.ASSISTANT,
             content="""
@@ -357,7 +539,21 @@ final_answer("got an error")
 
 
 class FakeCodeModelFunctionDef(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model that defines a function in step 1 and reuses it in step 2 to test state
+    #   persistence.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Returns function-definition code first, then code using that function.
+        # Inputs: messages (list; stringified for "special_marker"), stop_sequences (ignored).
+        # Outputs: first, code importing numpy and defining moving_average(x, w) via numpy convolve divided by
+        #   w; second, code computing moving_average of 0..5 with window 2 and passing it to final_answer.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         prompt = str(messages)
         if "special_marker" not in prompt:
             return ChatMessage(
@@ -387,7 +583,23 @@ final_answer(res)
 
 
 class FakeCodeModelSingleStep(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model that answers in one step by calling python_interpreter then final_answer.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Always returns a code block calling python_interpreter on "2*3.6452" and passing the result
+        #   to final_answer.
+        # Inputs: messages and stop_sequences (ignored).
+        # Outputs: a canned assistant ChatMessage.
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: the code block opens with a code tag but closes with triple backticks instead of the
+        #   closing code tag; it relies on the agent's lenient parsing. The class is also unused in this
+        #   module.
         return ChatMessage(
             role=MessageRole.ASSISTANT,
             content="""
@@ -401,7 +613,20 @@ final_answer(result)
 
 
 class FakeCodeModelNoReturn(Model):
+    # [CLASS DOC]
+    # HELPER: Scripted code Model that never calls final_answer, used to exhaust max_steps.
+    # Inputs: no constructor args.
+    # Outputs: see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def generate(self, messages, stop_sequences=None):
+        # [FUNCTION DOC]
+        # HELPER: Always returns code calling python_interpreter on "2*3.6452" and printing the result.
+        # Inputs: messages and stop_sequences (ignored).
+        # Outputs: a canned assistant ChatMessage (closing fence is triple backticks, not the closing code
+        #   tag).
+        # Exceptions: none raised directly.
+        # Side effects: none.
         return ChatMessage(
             role=MessageRole.ASSISTANT,
             content="""
@@ -415,7 +640,23 @@ print(result)
 
 
 class TestAgent:
+    # [CLASS DOC]
+    # Test group for end-to-end agent runs (CodeAgent and ToolCallingAgent) driven by the scripted fake
+    #   models.
+    # Inputs: pytest instantiates it with no args; methods use fixtures such as shared_datadir and
+    #   agent_logger.
+    # Outputs: none (test container).
+    # Exceptions: none raised directly.
+    # Side effects: none at class level.
     def test_fake_toolcalling_agent(self):
+        # [FUNCTION DOC]
+        # Runs a ToolCallingAgent with PythonInterpreterTool and FakeToolCallModel and checks the result and
+        #   memory.
+        # Inputs: self.
+        # Outputs: none; asserts the output is a str containing "7.2904", step 0 stores the task, step 1
+        #   observations contain "7.2904", and step 2 model_output is the final-answer text.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none beyond agent execution in-process.
         agent = ToolCallingAgent(tools=[PythonInterpreterTool()], model=FakeToolCallModel())
         output = agent.run("What is 2 multiplied by 3.6452?")
         assert isinstance(output, str)
@@ -425,10 +666,22 @@ class TestAgent:
         assert agent.memory.steps[2].model_output == "I will return the final answer."
 
     def test_toolcalling_agent_handles_image_tool_outputs(self, shared_datadir):
+        # [FUNCTION DOC]
+        # Checks a ToolCallingAgent stores an image tool output in state and returns it as AgentImage.
+        # Inputs: self, shared_datadir (fixture: Path to test data containing 000000039769.png).
+        # Outputs: none; asserts the run output is AgentImage and state "image.png" holds a PIL image.
+        # Exceptions: AssertionError on failure; ImportError if PIL is missing.
+        # Side effects: reads an image file from the test data directory.
         import PIL.Image
 
         @tool
         def fake_image_generation_tool(prompt: str) -> PIL.Image.Image:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning a PIL image loaded from the shared test data.
+            # Inputs: prompt (str; ignored).
+            # Outputs: PIL.Image.Image opened from shared_datadir/000000039769.png.
+            # Exceptions: file/PIL errors propagate.
+            # Side effects: opens a file on disk.
             """Tool that generates an image.
 
             Args:
@@ -445,12 +698,24 @@ class TestAgent:
         assert isinstance(agent.state["image.png"], PIL.Image.Image)
 
     def test_toolcalling_agent_handles_image_inputs(self, shared_datadir):
+        # [FUNCTION DOC]
+        # Checks a ToolCallingAgent accepts images passed to run and can call an image-understanding tool.
+        # Inputs: self, shared_datadir (fixture).
+        # Outputs: none; asserts the final answer equals "The image is a cat.".
+        # Exceptions: AssertionError on failure.
+        # Side effects: opens an image file from test data.
         import PIL.Image
 
         image = PIL.Image.open(shared_datadir / "000000039769.png")  # dummy input
 
         @tool
         def fake_image_understanding_tool(prompt: str, image: PIL.Image.Image) -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning a fixed caption.
+            # Inputs: prompt (str), image (PIL image); both ignored.
+            # Outputs: the string "The image is a cat.".
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Tool that creates a caption for an image.
 
             Args:
@@ -464,6 +729,13 @@ class TestAgent:
         assert output == "The image is a cat."
 
     def test_fake_code_agent(self):
+        # [FUNCTION DOC]
+        # Runs a CodeAgent with FakeCodeModel and checks the numeric answer and recorded tool calls.
+        # Inputs: self.
+        # Outputs: none; asserts output is float 7.2904, step 0 task text, and step 2 tool_calls equal a
+        #   single python_interpreter ToolCall with the final_answer code and id "call_2".
+        # Exceptions: AssertionError on failure.
+        # Side effects: executes generated code in the local Python executor.
         agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModel(), verbosity_level=10)
         output = agent.run("What is 2 multiplied by 3.6452?")
         assert isinstance(output, float)
@@ -474,6 +746,12 @@ class TestAgent:
         ]
 
     def test_additional_args_added_to_task(self):
+        # [FUNCTION DOC]
+        # Checks additional_args passed to run are appended to the agent task.
+        # Inputs: self.
+        # Outputs: none; asserts "Remember this" appears in agent.task.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none beyond agent run.
         agent = CodeAgent(tools=[], model=FakeCodeModel())
         agent.run(
             "What is 2 multiplied by 3.6452?",
@@ -482,6 +760,13 @@ class TestAgent:
         assert "Remember this" in agent.task
 
     def test_reset_conversations(self):
+        # [FUNCTION DOC]
+        # Checks the reset flag of run: reset clears memory, no reset appends to it.
+        # Inputs: self.
+        # Outputs: none; asserts answer 7.2904 and memory length 3, then 5 after reset=False, then 3 after
+        #   reset=True.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none beyond agent runs.
         agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModel())
         output = agent.run("What is 2 multiplied by 3.6452?", reset=True)
         assert output == 7.2904
@@ -496,9 +781,22 @@ class TestAgent:
         assert len(agent.memory.steps) == 3
 
     def test_setup_agent_with_empty_toolbox(self):
+        # [FUNCTION DOC]
+        # Checks a ToolCallingAgent can be constructed with an empty tool list without error.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: any constructor exception fails the test.
+        # Side effects: none.
         ToolCallingAgent(model=FakeToolCallModel(), tools=[])
 
     def test_fails_max_steps(self):
+        # [FUNCTION DOC]
+        # Checks that hitting max_steps (from init or overridden in run) yields a final step carrying
+        #   AgentMaxStepsError and a str answer.
+        # Inputs: self.
+        # Outputs: none; asserts 7 memory steps for max_steps 5 and 5 steps when run overrides max_steps to 3.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none beyond agent runs (the final answer is produced by the fake model).
         agent = CodeAgent(
             tools=[PythonInterpreterTool()],
             model=FakeCodeModelNoReturn(),  # use this callable because it never ends
@@ -520,6 +818,14 @@ class TestAgent:
         assert isinstance(answer, str)
 
     def test_tool_descriptions_get_baked_in_system_prompt(self):
+        # [FUNCTION DOC]
+        # Checks a tool's name and description are rendered into the CodeAgent system prompt as a function
+        #   stub.
+        # Inputs: self.
+        # Outputs: none; asserts the prompt contains a def line with the tool name and a docstring starting
+        #   with the description.
+        # Exceptions: AssertionError on failure.
+        # Side effects: mutates the name/description of a local PythonInterpreterTool instance.
         tool = PythonInterpreterTool()
         tool.name = "fake_tool_name"
         tool.description = "fake_tool_description"
@@ -530,12 +836,31 @@ class TestAgent:
         assert f'"""{tool.description}' in agent.system_prompt
 
     def test_module_imports_get_baked_in_system_prompt(self):
+        # [FUNCTION DOC]
+        # Checks every BASE_BUILTIN_MODULES entry is mentioned in the CodeAgent system prompt.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[], model=FakeCodeModel())
         agent.run("Empty task")
         for module in BASE_BUILTIN_MODULES:
             assert module in agent.system_prompt
 
     def test_init_agent_with_different_toolsets(self):
+        # [FUNCTION DOC]
+        # Checks tool-set handling at init: final_answer auto-added, duplicate names rejected, and
+        #   add_base_tools behaviour per agent type.
+        # Inputs: self.
+        # Outputs: none; asserts 1 tool for empty toolset, ValueError for duplicate tools and for a managed
+        #   agent clashing with a tool name, 3 tools for CodeAgent with base tools (no python_interpreter) and
+        #   4 for ToolCallingAgent.
+        # Exceptions: AssertionError on failure.
+        # Side effects: mutates name/description of a constructed agent.
+        # KNOWN ISSUE: the comment for the ToolCallingAgent case lists only final_answer, search and
+        #   visit_webpage although 4 tools are asserted (python_interpreter is the fourth). Also the second
+        #   pytest.raises block relies on agent being the earlier CodeAgent since the failing constructor
+        #   never rebinds it.
         toolset_1 = []
         agent = CodeAgent(tools=toolset_1, model=FakeCodeModel())
         assert len(agent.tools) == 1  # when no tools are provided, only the final_answer tool is added by default
@@ -560,6 +885,12 @@ class TestAgent:
         assert len(agent.tools) == 4  # added final_answer tool + search + visit_webpage
 
     def test_function_persistence_across_steps(self):
+        # [FUNCTION DOC]
+        # Checks a function defined in one CodeAgent step is still callable in a later step.
+        # Inputs: self.
+        # Outputs: none; asserts the first element of the moving average result is 0.5.
+        # Exceptions: AssertionError on failure.
+        # Side effects: executes generated code importing numpy.
         agent = CodeAgent(
             tools=[],
             model=FakeCodeModelFunctionDef(),
@@ -570,11 +901,24 @@ class TestAgent:
         assert res[0] == 0.5
 
     def test_init_managed_agent(self):
+        # [FUNCTION DOC]
+        # Checks name and description passed to CodeAgent are stored.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[], model=FakeCodeModelFunctionDef(), name="managed_agent", description="Empty")
         assert agent.name == "managed_agent"
         assert agent.description == "Empty"
 
     def test_agent_description_gets_correctly_inserted_in_system_prompt(self):
+        # [FUNCTION DOC]
+        # Checks the managed-agents section appears only in a manager agent system prompt and the placeholder
+        #   is rendered away.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         managed_agent = CodeAgent(
             tools=[], model=FakeCodeModelFunctionDef(), name="managed_agent", description="Empty"
         )
@@ -588,6 +932,13 @@ class TestAgent:
         assert "You can also give tasks to team members." in manager_agent.system_prompt
 
     def test_replay_shows_logs(self, agent_logger):
+        # [FUNCTION DOC]
+        # Checks run logs and replay output are written to the provided logger's console.
+        # Inputs: self, agent_logger (fixture with recording console).
+        # Outputs: none; asserts "New run", the final_answer code and the closing code tag appear, then after
+        #   a ToolCallingAgent run and replay that "arguments" appears.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes to the in-memory console of the fixture logger.
         agent = CodeAgent(
             tools=[],
             model=FakeCodeModelImport(),
@@ -613,8 +964,27 @@ class TestAgent:
         assert "arguments" in str_output
 
     def test_code_nontrivial_final_answer_works(self):
+        # [FUNCTION DOC]
+        # Checks final_answer called inside a nested user-defined function still ends the run.
+        # Inputs: self.
+        # Outputs: none; asserts output "Correct!".
+        # Exceptions: AssertionError on failure.
+        # Side effects: none beyond code execution.
         class FakeCodeModelFinalAnswer(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model whose code defines nested_answer calling final_answer("Correct!") and
+            #   invokes it.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Always returns the nested final_answer code block.
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: canned assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="""<code>
@@ -631,8 +1001,23 @@ nested_answer()
         assert output == "Correct!"
 
     def test_transformers_toolcalling_agent(self):
+        # [FUNCTION DOC]
+        # Integration test: ToolCallingAgent with a real TransformersModel (SmolLM2-360M-Instruct) calls
+        #   weather_api in one step and records token usage/timing.
+        # Inputs: self.
+        # Outputs: none; asserts the tool call name, serialized step fields (max_new_tokens 100, total tokens
+        #   over 100, duration over 0.1s) and presence of model_input_messages in full steps.
+        # Exceptions: AssertionError on failure; model loading errors propagate.
+        # Side effects: downloads the model from the Hugging Face Hub (network, disk cache) and runs inference
+        #   on available devices.
         @tool
         def weather_api(location: str, celsius: str = "") -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning a fixed bad-weather string.
+            # Inputs: location (str), celsius (str, default empty); both ignored.
+            # Outputs: a constant weather description string.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """
             Gets the weather in the next days at given location.
             Secretly this tool does not care about the location, it hates the weather everywhere.
@@ -662,9 +1047,23 @@ nested_answer()
         assert step_memory_dict["timing"]["duration"] > 0.1
 
     def test_final_answer_checks(self):
+        # [FUNCTION DOC]
+        # Checks final_answer_checks: a failing check records an error and a passing check lets the answer
+        #   through.
+        # Inputs: self.
+        # Outputs: none; asserts "failed with error" and the assertion text appear in memory messages for the
+        #   failing check; for the lambda check output is 7.2904, two ActionSteps exist and no error text.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         error_string = "failed with error"
 
         def check_always_fails(final_answer, memory, agent):
+            # [FUNCTION DOC]
+            # HELPER: Final-answer check that always fails by asserting False.
+            # Inputs: final_answer, memory, agent (all ignored).
+            # Outputs: never returns normally.
+            # Exceptions: AssertionError("Error raised in check") always.
+            # Side effects: none.
             assert False, "Error raised in check"
 
         agent = CodeAgent(model=FakeCodeModel(), tools=[], final_answer_checks=[check_always_fails])
@@ -684,9 +1083,23 @@ nested_answer()
         assert error_string not in str(agent.write_memory_to_messages())
 
     def test_final_answer_checks_with_agent_access(self):
+        # [FUNCTION DOC]
+        # Checks final-answer check functions can read agent attributes and state, and that state mismatches
+        #   are recorded as step errors.
+        # Inputs: self.
+        # Outputs: none; asserts outputs 7.2904 for passing checks, and for the mismatching check that some
+        #   step has an error mentioning "check_uses_agent_state failed".
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes "expected_answer" into agent.state.
         """Test that final answer checks can access agent properties."""
 
         def check_uses_agent_properties(final_answer, memory, agent):
+            # [FUNCTION DOC]
+            # HELPER: Final-answer check verifying the agent exposes memory, state and task.
+            # Inputs: final_answer (any), memory (ignored), agent (agent instance).
+            # Outputs: True for non-str answers, otherwise whether the string is non-empty.
+            # Exceptions: AssertionError if an attribute is missing.
+            # Side effects: none.
             # Access agent properties to validate the final answer
             assert hasattr(agent, "memory"), "Agent should have memory attribute"
             assert hasattr(agent, "state"), "Agent should have state attribute"
@@ -698,6 +1111,12 @@ nested_answer()
             return True
 
         def check_uses_agent_state(final_answer, memory, agent):
+            # [FUNCTION DOC]
+            # HELPER: Final-answer check comparing the answer to agent.state "expected_answer" if present.
+            # Inputs: final_answer (any), memory (ignored), agent (agent instance).
+            # Outputs: equality result with the expected answer, or True if no expectation is set.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             # Use agent state to validate the answer
             if "expected_answer" in agent.state:
                 return final_answer == agent.state["expected_answer"]
@@ -737,8 +1156,26 @@ nested_answer()
         )
 
     def test_generation_errors_are_raised(self):
+        # [FUNCTION DOC]
+        # Checks model generation failures surface as AgentGenerationError and stop the run.
+        # Inputs: self.
+        # Outputs: none; asserts 2 memory steps and "Generation failed" in the error.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         class FakeCodeModel(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model whose generate always fails (shadows the module-level FakeCodeModel).
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: see generate.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Always fails generation.
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: never returns.
+                # Exceptions: AssertionError("Generation failed") always.
+                # Side effects: none.
                 assert False, "Generation failed"
 
         agent = CodeAgent(model=FakeCodeModel(), tools=[])
@@ -748,6 +1185,15 @@ nested_answer()
         assert "Generation failed" in str(e)
 
     def test_planning_step_with_injected_memory(self):
+        # [FUNCTION DOC]
+        # Checks planning with memory injected before run: multiple planning steps occur and their input
+        #   messages include previous and current tasks.
+        # Inputs: self.
+        # Outputs: none; asserts more than 2 planning steps, first planning input has 4 messages (system with
+        #   task, memory with previous task, task message, user prompt), second has 6 messages containing both
+        #   tasks and "tools".
+        # Exceptions: AssertionError on failure.
+        # Side effects: appends a TaskStep directly to agent.memory.steps.
         """Test that agent properly uses update plan prompts when memory is injected before a run.
 
         This test verifies:
@@ -822,41 +1268,129 @@ nested_answer()
 
 
 class CustomFinalAnswerTool(FinalAnswerTool):
+    # [CLASS DOC]
+    # HELPER: FinalAnswerTool variant that appends "CUSTOM" to the answer.
+    # Inputs: inherits FinalAnswerTool constructor.
+    # Outputs: see forward.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def forward(self, answer) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Returns the answer concatenated with "CUSTOM".
+        # Inputs: answer (string-like).
+        # Outputs: answer plus "CUSTOM".
+        # Exceptions: TypeError if answer does not support concatenation with str.
+        # Side effects: none.
         return answer + "CUSTOM"
 
 
 class MockTool(Tool):
+    # [CLASS DOC]
+    # HELPER: Minimal Tool with a configurable name, no inputs and string output, used for name-validation
+    #   tests.
+    # Inputs: name (str) via constructor.
+    # Outputs: tool instance with name, description "Mock tool description", empty inputs and output_type
+    #   "string".
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def __init__(self, name):
+        # [FUNCTION DOC]
+        # HELPER: Sets name, a fixed description, empty inputs and string output type without calling
+        #   Tool.__init__.
+        # Inputs: name (str).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: mutates self.
+        # KNOWN ISSUE: skips Tool.__init__ (and thus its validation/setup), so the instance is only partly
+        #   initialized.
         self.name = name
         self.description = "Mock tool description"
         self.inputs = {}
         self.output_type = "string"
 
     def forward(self):
+        # [FUNCTION DOC]
+        # HELPER: Returns the constant "Mock tool output".
+        # Inputs: none.
+        # Outputs: str.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         return "Mock tool output"
 
 
 class MockAgent:
+    # [CLASS DOC]
+    # HELPER: Duck-typed managed agent exposing only name, tools dict and description.
+    # Inputs: name (str), tools (list of tools), description (str, default "Mock agent description").
+    # Outputs: object with name, tools mapping tool name to tool, and description.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def __init__(self, name, tools, description="Mock agent description"):
+        # [FUNCTION DOC]
+        # HELPER: Stores name, description and builds the tool-name-to-tool dict.
+        # Inputs: name (str), tools (iterable of objects with name), description (str, default "Mock agent
+        #   description").
+        # Outputs: none.
+        # Exceptions: AttributeError if a tool lacks name.
+        # Side effects: mutates self.
         self.name = name
         self.tools = {t.name: t for t in tools}
         self.description = description
 
 
 class DummyMultiStepAgent(MultiStepAgent):
+    # [CLASS DOC]
+    # HELPER: Concrete MultiStepAgent with no-op step and system-prompt initialization, for testing base-class
+    #   behaviour.
+    # Inputs: MultiStepAgent constructor args (tools, model, ...).
+    # Outputs: agent instance.
+    # Exceptions: those of MultiStepAgent.__init__.
+    # Side effects: none beyond the base class.
     def step(self, memory_step: ActionStep) -> Generator[None]:
+        # [FUNCTION DOC]
+        # HELPER: Generator step that yields a single None and does nothing else.
+        # Inputs: memory_step (ActionStep; ignored).
+        # Outputs: yields None once.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         yield None
 
     def initialize_system_prompt(self):
+        # [FUNCTION DOC]
+        # HELPER: No-op system prompt initializer.
+        # Inputs: none.
+        # Outputs: None.
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: returns None instead of a string, so system_prompt is None for this agent.
         pass
 
 
 class FakeLLMModel(Model):
+    # [CLASS DOC]
+    # HELPER: Fake Model returning an immediate final answer, either as a tool call or as code, optionally
+    #   with token usage.
+    # Inputs: give_token_usage (bool, default True).
+    # Outputs: model instance; see generate.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def __init__(self, give_token_usage: bool = True):
+        # [FUNCTION DOC]
+        # HELPER: Stores the give_token_usage flag without calling Model.__init__.
+        # Inputs: give_token_usage (bool, default True).
+        # Outputs: none.
+        # Exceptions: none raised directly.
+        # Side effects: mutates self.
         self.give_token_usage = give_token_usage
 
     def generate(self, prompt, tools_to_call_from=None, **kwargs):
+        # [FUNCTION DOC]
+        # HELPER: Returns a final answer of "This is the final answer." in the format the caller expects.
+        # Inputs: prompt (messages; ignored), tools_to_call_from (list or None), extra kwargs (ignored).
+        # Outputs: if tools_to_call_from is given, a message with a final_answer tool call (id fake_id);
+        #   otherwise a code block calling final_answer. Token usage 10 in / 20 out when enabled, else None.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         if tools_to_call_from is not None:
             return ChatMessage(
                 role=MessageRole.ASSISTANT,
@@ -883,7 +1417,20 @@ final_answer('This is the final answer.')
 
 
 class TestRunResult:
+    # [CLASS DOC]
+    # Test group for RunResult construction and return_full_result behaviour.
+    # Inputs: none (pytest-managed).
+    # Outputs: none.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def test_backward_compatibility(self):
+        # [FUNCTION DOC]
+        # Checks RunResult supports the deprecated messages argument/property with FutureWarning and rejects
+        #   passing both steps and messages.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         """Test that RunResult handles deprecated 'messages' parameter correctly."""
 
         # Test 1: Using new 'steps' parameter (should work without warning)
@@ -925,6 +1472,13 @@ class TestRunResult:
 
     @pytest.mark.parametrize("agent_class", [CodeAgent, ToolCallingAgent])
     def test_no_token_usage(self, agent_class):
+        # [FUNCTION DOC]
+        # Checks RunResult from CodeAgent/ToolCallingAgent when the model reports no token usage.
+        # Inputs: self, agent_class (parametrized: CodeAgent or ToolCallingAgent).
+        # Outputs: none; asserts RunResult with expected output, "success" state, None token_usage, list steps
+        #   and positive duration.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = agent_class(
             tools=[],
             model=FakeLLMModel(give_token_usage=False),
@@ -951,6 +1505,13 @@ class TestRunResult:
         ],
     )
     def test_full_result(self, init_return_full_result, run_return_full_result, expect_runresult):
+        # [FUNCTION DOC]
+        # Checks return_full_result precedence: run argument overrides the init setting when not None.
+        # Inputs: self, init_return_full_result (bool), run_return_full_result (bool or None),
+        #   expect_runresult (bool), all parametrized.
+        # Outputs: none; asserts a RunResult with token usage 10/20 when expected, else a str.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = ToolCallingAgent(
             tools=[],
             model=FakeLLMModel(),
@@ -971,12 +1532,31 @@ class TestRunResult:
 
 
 class TestMultiStepAgent:
+    # [CLASS DOC]
+    # Test group for MultiStepAgent base behaviour: init, prompt templates, callbacks, planning, final answer,
+    #   interrupts, validation and serialization.
+    # Inputs: none (pytest-managed).
+    # Outputs: none.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def test_instantiation_disables_logging_to_terminal(self):
+        # [FUNCTION DOC]
+        # Checks the logger level is -1 during tests (terminal logging disabled by a conftest fixture).
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         fake_model = MagicMock()
         agent = DummyMultiStepAgent(tools=[], model=fake_model)
         assert agent.logger.level == -1, "logging to terminal should be disabled for testing using a fixture"
 
     def test_instantiation_with_prompt_templates(self, prompt_templates):
+        # [FUNCTION DOC]
+        # Checks custom prompt templates are stored as given.
+        # Inputs: self, prompt_templates (fixture dict).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = DummyMultiStepAgent(tools=[], model=MagicMock(), prompt_templates=prompt_templates)
         assert agent.prompt_templates == prompt_templates
         assert agent.prompt_templates["system_prompt"] == "This is a test system prompt."
@@ -989,18 +1569,49 @@ class TestMultiStepAgent:
         [([], FinalAnswerTool), ([CustomFinalAnswerTool()], CustomFinalAnswerTool)],
     )
     def test_instantiation_with_final_answer_tool(self, tools, expected_final_answer_tool):
+        # [FUNCTION DOC]
+        # Checks a final_answer tool is always present, using a custom one if provided.
+        # Inputs: self, tools (list), expected_final_answer_tool (class), parametrized.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = DummyMultiStepAgent(tools=tools, model=MagicMock())
         assert "final_answer" in agent.tools
         assert isinstance(agent.tools["final_answer"], expected_final_answer_tool)
 
     def test_system_prompt_property(self):
+        # [FUNCTION DOC]
+        # Checks system_prompt is read from initialize_system_prompt and that assigning it raises
+        #   AttributeError with guidance.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         """Test that system_prompt property is read-only and calls initialize_system_prompt."""
 
         class SimpleAgent(MultiStepAgent):
+            # [CLASS DOC]
+            # HELPER: Local MultiStepAgent subclass with a fixed system prompt and a no-op step.
+            # Inputs: MultiStepAgent constructor args.
+            # Outputs: agent instance.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def initialize_system_prompt(self) -> str:
+                # [FUNCTION DOC]
+                # HELPER: Returns the fixed string "Test system prompt".
+                # Inputs: none.
+                # Outputs: str.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return "Test system prompt"
 
             def step(self, memory_step: ActionStep) -> Generator[None]:
+                # [FUNCTION DOC]
+                # HELPER: Generator yielding a single None.
+                # Inputs: memory_step (ignored).
+                # Outputs: yields None once.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 yield None
 
         # Create a simple agent with mocked model
@@ -1088,6 +1699,14 @@ class TestMultiStepAgent:
         ],
     )
     def test_setup_step_callbacks(self, step_callbacks, expected_registry_state):
+        # [FUNCTION DOC]
+        # Checks _setup_step_callbacks builds a CallbackRegistry with the expected number of callbacks per
+        #   step type (monitor.update_metrics always added for ActionStep).
+        # Inputs: self, step_callbacks (None, list or dict), expected_registry_state (dict of step type name
+        #   to count), parametrized.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: replaces agent.monitor with a MagicMock; reads the private _callbacks of the registry.
         """Test that _setup_step_callbacks correctly sets up the callback registry."""
         # Create a dummy agent
         agent = DummyMultiStepAgent(tools=[], model=MagicMock())
@@ -1110,6 +1729,15 @@ class TestMultiStepAgent:
         assert actual_registry_state == expected_registry_state
 
     def test_finalize_step_callbacks_with_list(self):
+        # [FUNCTION DOC]
+        # Checks list-form step callbacks run only for ActionStep via _finalize_step.
+        # Inputs: self.
+        # Outputs: none; asserts both callbacks called once with the action step and agent, and not called for
+        #   a PlanningStep.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
+        # KNOWN ISSUE: the in-code comment says callbacks are "called again with the planning step" but the
+        #   assertions check they are not called.
         # Create mock callbacks
         callback1 = MagicMock()
         callback2 = MagicMock()
@@ -1145,6 +1773,15 @@ class TestMultiStepAgent:
         callback2.assert_not_called()
 
     def test_finalize_step_callbacks_by_type(self):
+        # [FUNCTION DOC]
+        # Checks dict-form step callbacks dispatch by step type, with MemoryStep callbacks firing for every
+        #   step.
+        # Inputs: self.
+        # Outputs: none; asserts the right callbacks fire for ActionStep, PlanningStep and FinalAnswerStep.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
+        # KNOWN ISSUE: the comment before the final-answer section says "Test with PlanningStep" although a
+        #   FinalAnswerStep is used.
         # Create mock callbacks for different step types
         action_step_callback = MagicMock()
         action_step_callback_2 = MagicMock()
@@ -1216,8 +1853,26 @@ class TestMultiStepAgent:
         final_answer_step_callback.assert_called_once_with(final_answer_step, agent=agent)
 
     def test_logs_display_thoughts_even_if_error(self):
+        # [FUNCTION DOC]
+        # Checks model output text is logged even when no tool call or code is produced, for both agent types.
+        # Inputs: self.
+        # Outputs: none; asserts "don't" and "want" appear in captured console output.
+        # Exceptions: AssertionError on failure.
+        # Side effects: captures console output.
         class FakeJsonModelNoCall(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model that returns text without tool calls.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None, tools_to_call_from=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns "I don't want to call tools today" with no tool calls.
+                # Inputs: messages, stop_sequences, tools_to_call_from (ignored).
+                # Outputs: assistant ChatMessage with that content and raw text.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="""I don't want to call tools today""",
@@ -1231,7 +1886,19 @@ class TestMultiStepAgent:
         assert "don't" in capture.get() and "want" in capture.get()
 
         class FakeCodeModelNoCall(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model that returns text without a code block.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns "I don't want to write an action today".
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="""I don't want to write an action today""",
@@ -1243,6 +1910,12 @@ class TestMultiStepAgent:
         assert "don't" in capture.get() and "want" in capture.get()
 
     def test_step_number(self):
+        # [FUNCTION DOC]
+        # Checks step_number starts at 0 and equals max_steps + 1 after a run that never answers.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         fake_model = MagicMock()
         fake_model.generate.return_value = ChatMessage(
             role=MessageRole.ASSISTANT,
@@ -1290,6 +1963,15 @@ class TestMultiStepAgent:
         ],
     )
     def test_planning_step(self, step, expected_messages_list):
+        # [FUNCTION DOC]
+        # Checks _generate_planning_step builds the right model input messages for the initial plan (step 1)
+        #   and plan updates (step 2), and calls the model once.
+        # Inputs: self, step (int), expected_messages_list (list of lists of ChatMessage with placeholder
+        #   texts), parametrized.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: mutates the parametrized expected ChatMessage contents in place, replacing
+        #   placeholders with rendered templates.
         fake_model = MagicMock()
         agent = CodeAgent(
             tools=[],
@@ -1385,6 +2067,16 @@ class TestMultiStepAgent:
         ],
     )
     def test_provide_final_answer(self, expected_messages_list):
+        # [FUNCTION DOC]
+        # Checks provide_final_answer sends the final-answer pre/post messages to the model and returns its
+        #   content.
+        # Inputs: self, expected_messages_list (parametrized; second case adds an image item to the system
+        #   message).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: mutates the parametrized expected message texts in place.
+        # KNOWN ISSUE: the image case cannot really be verified since no images are given to the agent; the
+        #   comparison uses zip over contents, so the extra expected image item is silently ignored.
         fake_model = MagicMock()
         fake_model.generate.return_value = ChatMessage(
             role=MessageRole.ASSISTANT,
@@ -1427,6 +2119,12 @@ class TestMultiStepAgent:
                     assert content == expected_content
 
     def test_interrupt(self):
+        # [FUNCTION DOC]
+        # Checks calling agent.interrupt from a step callback aborts run with AgentError "Agent interrupted".
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         fake_model = MagicMock()
         fake_model.generate.return_value = ChatMessage(
             role=MessageRole.ASSISTANT,
@@ -1437,6 +2135,12 @@ class TestMultiStepAgent:
         )
 
         def interrupt_callback(memory_step, agent):
+            # [FUNCTION DOC]
+            # HELPER: Step callback that interrupts the agent.
+            # Inputs: memory_step (ignored), agent (agent instance).
+            # Outputs: None.
+            # Exceptions: none raised directly.
+            # Side effects: sets the agent's interrupt flag.
             agent.interrupt()
 
         agent = CodeAgent(
@@ -1484,6 +2188,15 @@ class TestMultiStepAgent:
         ],
     )
     def test_validate_tools_and_managed_agents(self, tools, managed_agents, name, expectation):
+        # [FUNCTION DOC]
+        # Checks name uniqueness validation across tools, managed agents and the agent name.
+        # Inputs: self, tools (list of MockTool), managed_agents (list of MockAgent), name (str), expectation
+        #   (context manager: no raise or raises ValueError), parametrized.
+        # Outputs: none.
+        # Exceptions: AssertionError/ValueError mismatch fails the test.
+        # Side effects: none.
+        # KNOWN ISSUE: the case comment "duplicate managed agent name and managed agent tool name" actually
+        #   tests the agent name clashing with a tool name.
         fake_model = MagicMock()
         with expectation:
             DummyMultiStepAgent(
@@ -1494,6 +2207,14 @@ class TestMultiStepAgent:
             )
 
     def test_from_dict(self):
+        # [FUNCTION DOC]
+        # Checks MultiStepAgent.from_dict rebuilds model (via patched MODEL_REGISTRY), tools from code,
+        #   settings, and that kwargs override dict values.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: temporarily patches smolagents.models.MODEL_REGISTRY; executes tool source code from
+        #   the dict.
         # Create a test agent dictionary
         agent_dict = {
             "model": {"class": "TransformersModel", "data": {"model_id": "test/model"}},
@@ -1544,6 +2265,13 @@ class TestMultiStepAgent:
         assert agent.max_steps == 30
 
     def test_multiagent_to_dict_from_dict_roundtrip(self):
+        # [FUNCTION DOC]
+        # Checks to_dict serializes managed agents and from_dict recreates them with names, descriptions and
+        #   max_steps.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: temporarily patches MODEL_REGISTRY with a "MagicMock" entry.
         """Test that to_dict() and from_dict() work correctly for agents with managed agents."""
         # Create a managed agent
         managed_agent = CodeAgent(
@@ -1595,6 +2323,12 @@ class TestMultiStepAgent:
         assert recreated_managed_agent.max_steps == 5
 
     def test_from_dict_invalid_model_class(self):
+        # [FUNCTION DOC]
+        # Checks from_dict raises ValueError naming an unknown model class and listing supported models.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         """Test that from_dict raises ValueError with helpful message for invalid model class."""
         agent_dict = {
             "class": "CodeAgent",
@@ -1612,6 +2346,13 @@ class TestMultiStepAgent:
         assert "Supported models:" in error_message
 
     def test_from_dict_invalid_agent_class(self):
+        # [FUNCTION DOC]
+        # Checks from_dict raises ValueError naming an unknown managed agent class and listing supported
+        #   agents.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: temporarily patches MODEL_REGISTRY.
         """Test that from_dict raises ValueError with helpful message for invalid agent class."""
         # Create a valid agent first
         agent = CodeAgent(tools=[], model=MagicMock(), name="test_agent")
@@ -1643,12 +2384,31 @@ class TestMultiStepAgent:
 
 
 class TestToolCallingAgent:
+    # [CLASS DOC]
+    # Test group for ToolCallingAgent-specific behaviour.
+    # Inputs: none (pytest-managed); methods use the test_tool fixture.
+    # Outputs: none.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def test_toolcalling_agent_instructions(self):
+        # [FUNCTION DOC]
+        # Checks instructions are stored and rendered into the ToolCallingAgent system prompt.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = ToolCallingAgent(tools=[], model=MagicMock(), instructions="Test instructions")
         assert agent.instructions == "Test instructions"
         assert "Test instructions" in agent.system_prompt
 
     def test_toolcalling_agent_passes_both_tools_and_managed_agents(self, test_tool):
+        # [FUNCTION DOC]
+        # Checks the model receives both regular tools and managed agents (plus final_answer) in
+        #   tools_to_call_from.
+        # Inputs: self, test_tool (fixture tool named test_tool).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: advances a streaming run by one event only (generator left unfinished).
         """Test that both tools and managed agents are passed to the model."""
         managed_agent = MagicMock()
         managed_agent.name = "managed_agent"
@@ -1677,6 +2437,13 @@ class TestToolCallingAgent:
 
     @patch("huggingface_hub.InferenceClient")
     def test_toolcalling_agent_api(self, mock_inference_client):
+        # [FUNCTION DOC]
+        # Checks ToolCallingAgent with InferenceClientModel parses tool calls from JSON content and from
+        #   native tool_calls.
+        # Inputs: self, mock_inference_client (patched huggingface_hub.InferenceClient).
+        # Outputs: none; asserts tool name, parsed arguments and observations in both modes.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none (client is mocked).
         mock_client = mock_inference_client.return_value
         mock_response = mock_client.chat_completion.return_value
         mock_response.choices[0].message = ChatCompletionOutputMessage(
@@ -1692,6 +2459,12 @@ class TestToolCallingAgent:
 
         @tool
         def weather_api(location: str, date: str) -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning a sunny weather string.
+            # Inputs: location (str), date (str).
+            # Outputs: formatted string naming location and date.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """
             Gets the weather in the next days at given location.
             Args:
@@ -1729,6 +2502,15 @@ class TestToolCallingAgent:
 
     @patch("openai.OpenAI")
     def test_toolcalling_agent_stream_logs_multiple_tool_calls_observations(self, mock_openai_client, test_tool):
+        # [FUNCTION DOC]
+        # Checks streamed tool-call deltas from OpenAIModel are assembled into two tool calls whose
+        #   observations are both logged.
+        # Inputs: self, mock_openai_client (patched openai.OpenAI), test_tool (fixture).
+        # Outputs: none; asserts two test_tool calls and observations "Processed: output1" and "Processed:
+        #   output2" joined by newline.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none (client mocked).
+        # KNOWN ISSUE: mock_usage is built but never used.
         """Test that ToolCallingAgent with stream_outputs=True logs the observations of all tool calls when multiple are called."""
         mock_client = mock_openai_client.return_value
         from smolagents import OpenAIModel
@@ -1789,11 +2571,35 @@ class TestToolCallingAgent:
         ]
 
         class MockChoice:
+            # [CLASS DOC]
+            # HELPER: Mock streaming choice wrapping a delta.
+            # Inputs: delta (ChoiceDelta).
+            # Outputs: object with delta attribute.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self, delta):
+                # [FUNCTION DOC]
+                # HELPER: Stores the delta.
+                # Inputs: delta.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates self.
                 self.delta = delta
 
         class MockChunk:
+            # [CLASS DOC]
+            # HELPER: Mock streaming chunk holding one choice and no usage.
+            # Inputs: delta (ChoiceDelta).
+            # Outputs: object with choices list and usage None.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self, delta):
+                # [FUNCTION DOC]
+                # HELPER: Wraps delta in a MockChoice list and sets usage to None.
+                # Inputs: delta.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates self.
                 self.choices = [MockChoice(delta)]
                 self.usage = None
 
@@ -1816,40 +2622,124 @@ class TestToolCallingAgent:
     def test_toolcalling_agent_final_answer_cannot_be_called_with_parallel_tool_calls(
         self, mock_openai_client, test_tool
     ):
+        # [FUNCTION DOC]
+        # Checks that a final_answer tool call issued in parallel with another tool call is rejected with an
+        #   error on the step.
+        # Inputs: self, mock_openai_client (patched openai.OpenAI), test_tool (fixture).
+        # Outputs: none; asserts step 1 error message forbids other tool calls alongside final answer.
+        # Exceptions: AssertionError on failure.
+        # Side effects: prints the tool calls to stdout via the mock model_dump.
+        # KNOWN ISSUE: the docstring talks about stream_outputs and returning all tool calls, but the test
+        #   uses non-streaming mode and checks for an error. ExtendedChatMessage is defined but unused.
         """Test that ToolCallingAgent with stream_outputs=True returns the all tool calls when multiple are called."""
         mock_client = mock_openai_client.return_value
 
         from smolagents import OpenAIModel
 
         class ExtendedChatMessage(ChatMessage):
+            # [CLASS DOC]
+            # HELPER: Unused ChatMessage subclass accepting a usage keyword.
+            # Inputs: ChatMessage args plus required keyword usage (discarded).
+            # Outputs: ChatMessage instance.
+            # Exceptions: those of ChatMessage.
+            # Side effects: none.
             def __init__(self, *args, usage, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Calls the ChatMessage constructor, dropping usage.
+                # Inputs: positional/keyword ChatMessage args, usage (ignored).
+                # Outputs: none.
+                # Exceptions: those of ChatMessage.__init__.
+                # Side effects: mutates self.
                 super().__init__(*args, **kwargs)
 
             def model_dump(self, include=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns the JSON string dump of the message.
+                # Inputs: include (ignored).
+                # Outputs: JSON string.
+                # Exceptions: those of model_dump_json.
+                # Side effects: none.
+                # KNOWN ISSUE: calls super().model_dump_json, which ChatMessage (a dataclass) may not provide;
+                #   unused so never triggered.
                 return super().model_dump_json()
 
         class MockChoice:
+            # [CLASS DOC]
+            # HELPER: Mock non-streaming choice wrapping a message.
+            # Inputs: chat_message.
+            # Outputs: object with message attribute.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self, chat_message):
+                # [FUNCTION DOC]
+                # HELPER: Stores the message.
+                # Inputs: chat_message.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates self.
                 self.message = chat_message
 
         class MockChatCompletion:
+            # [CLASS DOC]
+            # HELPER: Mock OpenAI chat completion with one choice and fixed usage 10/20.
+            # Inputs: chat_message.
+            # Outputs: object with choices and usage.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self, chat_message):
+                # [FUNCTION DOC]
+                # HELPER: Builds the choices list and a MockTokenUsage(10, 20).
+                # Inputs: chat_message.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates self.
                 self.choices = [MockChoice(chat_message)]
                 self.usage = MockTokenUsage(prompt_tokens=10, completion_tokens=20)
 
         class MockTokenUsage:
+            # [CLASS DOC]
+            # HELPER: Mock usage object with prompt and completion token counts.
+            # Inputs: prompt_tokens (int), completion_tokens (int).
+            # Outputs: object holding the counts.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def __init__(self, prompt_tokens, completion_tokens):
+                # [FUNCTION DOC]
+                # HELPER: Stores the two token counts.
+                # Inputs: prompt_tokens, completion_tokens.
+                # Outputs: none.
+                # Exceptions: none raised directly.
+                # Side effects: mutates self.
                 self.prompt_tokens = prompt_tokens
                 self.completion_tokens = completion_tokens
 
         from dataclasses import asdict
 
         class ExtendedChatCompletionOutputMessage(ChatCompletionOutputMessage):
+            # [CLASS DOC]
+            # HELPER: huggingface_hub ChatCompletionOutputMessage subclass that also carries usage and dumps
+            #   to a plain dict.
+            # Inputs: ChatCompletionOutputMessage args plus required keyword usage.
+            # Outputs: message instance.
+            # Exceptions: those of the base dataclass.
+            # Side effects: none.
             def __init__(self, *args, usage, **kwargs):
+                # [FUNCTION DOC]
+                # HELPER: Initializes the base message and stores usage.
+                # Inputs: base args, usage.
+                # Outputs: none.
+                # Exceptions: those of the base init.
+                # Side effects: mutates self.
                 super().__init__(*args, **kwargs)
                 self.usage = usage
 
             def model_dump(self, include=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns a dict with role, content and tool_calls converted via dataclass asdict.
+                # Inputs: include (ignored).
+                # Outputs: dict.
+                # Exceptions: TypeError if tool_calls is None or contains non-dataclasses.
+                # Side effects: prints "TOOL CALLS" and the tool calls to stdout.
                 print("TOOL CALLS", self.tool_calls)
                 return {
                     "role": self.role,
@@ -1889,6 +2779,14 @@ class TestToolCallingAgent:
 
     @patch("huggingface_hub.InferenceClient")
     def test_toolcalling_agent_api_misformatted_output(self, mock_inference_client):
+        # [FUNCTION DOC]
+        # Checks malformed JSON tool output records a parse error on the step and the run continues to a final
+        #   answer.
+        # Inputs: self, mock_inference_client (patched huggingface_hub.InferenceClient).
+        # Outputs: none; asserts tool_calls None, invalid-JSON error message, "Error while parsing" logged and
+        #   4 memory steps.
+        # Exceptions: AssertionError on failure.
+        # Side effects: captures console output.
         """Test that even misformatted json blobs don't interrupt the run for a ToolCallingAgent."""
         mock_client = mock_inference_client.return_value
         mock_response = mock_client.chat_completion.return_value
@@ -1918,20 +2816,52 @@ class TestToolCallingAgent:
         "Additionally, it uses CodeAgent instead of ToolCallingAgent (GH-1409)"
     )
     def test_change_tools_after_init(self):
+        # [FUNCTION DOC]
+        # Skipped test intended to check that replacing tools after init takes effect.
+        # Inputs: self.
+        # Outputs: none; would assert the answer "2CUSTOM".
+        # Exceptions: AssertionError on failure (if run).
+        # Side effects: mutates agent.tools.
+        # KNOWN ISSUE: skipped as broken (GH-1255, GH-1409): uses CodeAgent in the ToolCallingAgent group and
+        #   the replacement tool has a different name.
         from smolagents import tool
 
         @tool
         def fake_tool_1() -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning "1".
+            # Inputs: none.
+            # Outputs: "1".
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Fake tool"""
             return "1"
 
         @tool
         def fake_tool_2() -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning "2".
+            # Inputs: none.
+            # Outputs: "2".
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Fake tool"""
             return "2"
 
         class FakeCodeModel(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model returning code that passes fake_tool_1() to final_answer.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns the fixed code block.
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(role=MessageRole.ASSISTANT, content="<code>\nfinal_answer(fake_tool_1())\n</code>")
 
         agent = CodeAgent(tools=[fake_tool_1], model=FakeCodeModel())
@@ -1943,13 +2873,31 @@ class TestToolCallingAgent:
         assert answer == "2CUSTOM"
 
     def test_custom_final_answer_with_custom_inputs(self, test_tool):
+        # [FUNCTION DOC]
+        # Checks a custom final-answer tool with two inputs is called with both arguments by ToolCallingAgent.
+        # Inputs: self, test_tool (fixture).
+        # Outputs: none; asserts answer "1 and 2" and last step tool call name final_answer.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         class CustomFinalAnswerToolWithCustomInputs(FinalAnswerTool):
+            # [CLASS DOC]
+            # HELPER: FinalAnswerTool with inputs answer1 and answer2 joining them with " and ".
+            # Inputs: inherits FinalAnswerTool constructor.
+            # Outputs: tool instance.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             inputs = {
                 "answer1": {"type": "string", "description": "First part of the answer."},
                 "answer2": {"type": "string", "description": "Second part of the answer."},
             }
 
             def forward(self, answer1: str, answer2: str) -> str:
+                # [FUNCTION DOC]
+                # HELPER: Joins the two answers with " and ".
+                # Inputs: answer1 (str), answer2 (str).
+                # Outputs: combined str.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return answer1 + " and " + answer2
 
         model = MagicMock()
@@ -2063,6 +3011,14 @@ class TestToolCallingAgent:
         ],
     )
     def test_process_tool_calls(self, test_case, test_tool):
+        # [FUNCTION DOC]
+        # Checks process_tool_calls yields ToolOutputs, sets observations and tool_calls on the step, and
+        #   raises for bad tool names, tool errors or bad arguments.
+        # Inputs: self, test_case (dict with tool_calls, expected_observations, expected_final_outputs,
+        #   expected_error), test_tool (fixture), parametrized.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: mutates the ActionStep it creates.
         # Create a ToolCallingAgent instance with the test tool
         agent = ToolCallingAgent(tools=[test_tool], model=MagicMock())
         # Create chat message with the specified tool calls for process_tool_calls
@@ -2090,7 +3046,20 @@ class TestToolCallingAgent:
 
 
 class TestCodeAgent:
+    # [CLASS DOC]
+    # Test group for CodeAgent-specific behaviour.
+    # Inputs: none (pytest-managed).
+    # Outputs: none.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def test_code_agent_instructions(self):
+        # [FUNCTION DOC]
+        # Checks instructions are stored and rendered into the CodeAgent system prompt, with and without
+        #   structured outputs.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[], model=MagicMock(), instructions="Test instructions")
         assert agent.instructions == "Test instructions"
         assert "Test instructions" in agent.system_prompt
@@ -2103,6 +3072,13 @@ class TestCodeAgent:
 
     @pytest.mark.parametrize("provide_run_summary", [False, True])
     def test_call_with_provide_run_summary(self, provide_run_summary):
+        # [FUNCTION DOC]
+        # Checks calling a managed agent returns the report wrapper and appends a summary of work when
+        #   provide_run_summary is set.
+        # Inputs: self, provide_run_summary (bool, parametrized).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: replaces agent.run and write_memory_to_messages with mocks.
         agent = CodeAgent(tools=[], model=MagicMock(), provide_run_summary=provide_run_summary)
         assert agent.provide_run_summary is provide_run_summary
         agent.name = "test_agent"
@@ -2121,12 +3097,24 @@ class TestCodeAgent:
         assert result == expected_summary
 
     def test_code_agent_image_output(self):
+        # [FUNCTION DOC]
+        # Checks a CodeAgent can return a PIL image produced by a tool.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         from PIL import Image
 
         from smolagents import tool
 
         @tool
         def image_generation_tool():
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning a 100x100 red PIL image.
+            # Inputs: none.
+            # Outputs: PIL.Image.Image.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Generate an image"""
             return Image.new("RGB", (100, 100), color="red")
 
@@ -2135,8 +3123,26 @@ class TestCodeAgent:
         assert isinstance(output, Image.Image)
 
     def test_errors_logging(self):
+        # [FUNCTION DOC]
+        # Checks error logs show square brackets literally (not interpreted as rich markup).
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: captures console output.
         class FakeCodeModel(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model returning code that indexes a list out of range.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns code setting secret to 3 and indexing a two-item list with it.
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(role=MessageRole.ASSISTANT, content="<code>\nsecret=3;['1', '2'][secret]\n</code>")
 
         agent = CodeAgent(tools=[], model=FakeCodeModel(), verbosity_level=1)
@@ -2148,6 +3154,12 @@ class TestCodeAgent:
         assert "[secret]" in capture.get()
 
     def test_missing_import_triggers_advice_in_error_log(self):
+        # [FUNCTION DOC]
+        # Checks an unauthorized import error log advises using additional_authorized_imports.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: captures console output.
         # Set explicit verbosity level to 1 to override the default verbosity level of -1 set in CI fixture
         agent = CodeAgent(tools=[], model=FakeCodeModelImport(), verbosity_level=1)
 
@@ -2157,6 +3169,13 @@ class TestCodeAgent:
         assert "`additional_authorized_imports`" in str_output.replace("\n", "")
 
     def test_errors_show_offending_line_and_error(self):
+        # [FUNCTION DOC]
+        # Checks a runtime error in generated code names the offending line and ValueError, and the run
+        #   recovers.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModelError())
         output = agent.run("What is 2 multiplied by 3.6452?")
         assert isinstance(output, AgentText)
@@ -2165,11 +3184,23 @@ class TestCodeAgent:
         assert "ValueError" in str(agent.memory.steps)
 
     def test_error_saves_previous_print_outputs(self):
+        # [FUNCTION DOC]
+        # Checks prints executed before an error are kept in the step observations.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModelError())
         agent.run("What is 2 multiplied by 3.6452?")
         assert "Flag!" in str(agent.memory.steps[1].observations)
 
     def test_syntax_error_show_offending_lines(self):
+        # [FUNCTION DOC]
+        # Checks a syntax error shows the offending lines and the code_action is stored verbatim.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         agent = CodeAgent(tools=[PythonInterpreterTool()], model=FakeCodeModelSyntaxError())
         output = agent.run("What is 2 multiplied by 3.6452?")
         assert isinstance(output, AgentText)
@@ -2182,6 +3213,15 @@ b = a * 2
 print("Ok, calculation done!")""")
 
     def test_end_code_appending(self):
+        # [FUNCTION DOC]
+        # Checks the agent normalizes model outputs so recorded model_output and message content end with the
+        #   closing code tag.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
+        # KNOWN ISSUE: the first assertion checks for a legacy end_code marker that the fake output never
+        #   contained, so it is trivially true.
         # Checking original output message
         orig_output = FakeCodeModelNoReturn().generate([])
         assert not orig_output.content.endswith("<end_code>")
@@ -2210,20 +3250,51 @@ print("Ok, calculation done!")""")
         reason="Test is not properly implemented (GH-1255) because fake_tools should have the same name. "
     )
     def test_change_tools_after_init(self):
+        # [FUNCTION DOC]
+        # Skipped duplicate of the tools-replacement test for CodeAgent.
+        # Inputs: self.
+        # Outputs: none; would assert "2CUSTOM".
+        # Exceptions: AssertionError on failure (if run).
+        # Side effects: mutates agent.tools.
+        # KNOWN ISSUE: skipped as broken (GH-1255): the replacement tool keeps a different name.
         from smolagents import tool
 
         @tool
         def fake_tool_1() -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning "1".
+            # Inputs: none.
+            # Outputs: "1".
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Fake tool"""
             return "1"
 
         @tool
         def fake_tool_2() -> str:
+            # [FUNCTION DOC]
+            # HELPER: Nested @tool returning "2".
+            # Inputs: none.
+            # Outputs: "2".
+            # Exceptions: none raised directly.
+            # Side effects: none.
             """Fake tool"""
             return "2"
 
         class FakeCodeModel(Model):
+            # [CLASS DOC]
+            # HELPER: Local fake Model returning code that passes fake_tool_1() to final_answer.
+            # Inputs: none.
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             def generate(self, messages, stop_sequences=None):
+                # [FUNCTION DOC]
+                # HELPER: Returns the fixed code block.
+                # Inputs: messages, stop_sequences (ignored).
+                # Outputs: assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(role=MessageRole.ASSISTANT, content="<code>\nfinal_answer(fake_tool_1())\n</code>")
 
         agent = CodeAgent(tools=[fake_tool_1], model=FakeCodeModel())
@@ -2235,6 +3306,12 @@ print("Ok, calculation done!")""")
         assert answer == "2CUSTOM"
 
     def test_local_python_executor_with_custom_functions(self):
+        # [FUNCTION DOC]
+        # Checks executor_kwargs additional_functions are registered as static tools of the local executor.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         model = MagicMock()
         model.generate.return_value = ChatMessage(
             role=MessageRole.ASSISTANT,
@@ -2249,6 +3326,14 @@ print("Ok, calculation done!")""")
 
     @pytest.mark.parametrize("agent_dict_version", ["v1.9", "v1.10", "v1.20"])
     def test_from_folder(self, agent_dict_version, get_agent_dict):
+        # [FUNCTION DOC]
+        # Checks CodeAgent.from_folder loads agent.json across serialization versions with patched Path and
+        #   MODEL_REGISTRY.
+        # Inputs: self, agent_dict_version (str, parametrized), get_agent_dict (fixture returning the dict for
+        #   a version).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: temporarily patches smolagents.agents.Path and MODEL_REGISTRY.
         agent_dict = get_agent_dict(agent_dict_version)
         mock_model_class = MagicMock()
         mock_model_instance = MagicMock()
@@ -2282,6 +3367,13 @@ print("Ok, calculation done!")""")
         assert agent.prompt_templates["system_prompt"] == "dummy system prompt"
 
     def test_from_dict(self):
+        # [FUNCTION DOC]
+        # Checks CodeAgent.from_dict applies CodeAgent-specific fields, defaults when missing, and kwargs
+        #   overrides.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: temporarily patches MODEL_REGISTRY; executes tool code from the dict.
         # Create a test agent dictionary
         agent_dict = {
             "model": {"class": "InferenceClientModel", "data": {"model_id": "Qwen/Qwen2.5-Coder-32B-Instruct"}},
@@ -2344,13 +3436,31 @@ print("Ok, calculation done!")""")
         assert agent.executor_kwargs == {"max_print_outputs_length": 5_000}
 
     def test_custom_final_answer_with_custom_inputs(self):
+        # [FUNCTION DOC]
+        # Checks a custom final-answer tool with two inputs works from CodeAgent code.
+        # Inputs: self.
+        # Outputs: none; asserts answer "1CUSTOM2".
+        # Exceptions: AssertionError on failure.
+        # Side effects: none.
         class CustomFinalAnswerToolWithCustomInputs(FinalAnswerTool):
+            # [CLASS DOC]
+            # HELPER: FinalAnswerTool with inputs answer1 and answer2 joined by "CUSTOM".
+            # Inputs: inherits FinalAnswerTool constructor.
+            # Outputs: tool instance.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             inputs = {
                 "answer1": {"type": "string", "description": "First part of the answer."},
                 "answer2": {"type": "string", "description": "Second part of the answer."},
             }
 
             def forward(self, answer1: str, answer2: str) -> str:
+                # [FUNCTION DOC]
+                # HELPER: Joins answer1 and answer2 with "CUSTOM".
+                # Inputs: answer1 (str), answer2 (str).
+                # Outputs: str.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return answer1 + "CUSTOM" + answer2
 
         model = MagicMock()
@@ -2362,6 +3472,13 @@ print("Ok, calculation done!")""")
         assert answer == "1CUSTOM2"
 
     def test_use_structured_outputs_internally(self):
+        # [FUNCTION DOC]
+        # Checks with structured outputs the code is read from the JSON "code" field and yielded as the first
+        #   ToolCall's arguments.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: calls the private _step_stream generator once.
         expected_code = "print('Hello, world!')"
         model = MagicMock()
         # mock structured output generation
@@ -2379,7 +3496,20 @@ print("Ok, calculation done!")""")
 
 
 class TestMultiAgents:
+    # [CLASS DOC]
+    # Test group for manager/managed multi-agent setups.
+    # Inputs: none (pytest-managed).
+    # Outputs: none.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     def test_multiagents_save(self, tmp_path):
+        # [FUNCTION DOC]
+        # Checks saving a manager agent with managed agents writes the expected folder structure and
+        #   from_folder reloads it with kwargs overrides.
+        # Inputs: self, tmp_path (pytest temp dir).
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: writes files into tmp_path.
         model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct", max_tokens=2096, temperature=0.5)
 
         web_agent = ToolCallingAgent(
@@ -2414,6 +3544,14 @@ class TestMultiAgents:
         }
 
         def verify_structure(current_path: Path, structure: dict):
+            # [FUNCTION DOC]
+            # HELPER: Recursively asserts that directories and files in a nested structure dict exist under a
+            #   path.
+            # Inputs: current_path (Path), structure (dict where key "files" lists file names and other keys
+            #   are subdirectory names mapping to nested dicts).
+            # Outputs: None.
+            # Exceptions: AssertionError for a missing or wrongly-typed entry.
+            # Side effects: reads the filesystem.
             for dir_name, contents in structure.items():
                 if dir_name != "files":
                     # For directories, verify they exist and recurse into them
@@ -2443,7 +3581,21 @@ class TestMultiAgents:
         assert agent2.model.kwargs["temperature"] == pytest.approx(0.5)
 
     def test_multiagents(self):
+        # [FUNCTION DOC]
+        # Checks CodeAgent and ToolCallingAgent managers can delegate to a managed ToolCallingAgent, its
+        #   output is logged, and visualize prints a tree.
+        # Inputs: self.
+        # Outputs: none.
+        # Exceptions: AssertionError on failure.
+        # Side effects: captures console output.
         class FakeModelMultiagentsManagerAgent(Model):
+            # [CLASS DOC]
+            # HELPER: Fake manager Model that first delegates to search_agent then returns "Final report.",
+            #   via tool calls or code depending on mode.
+            # Inputs: none (model_id "fake_model").
+            # Outputs: see generate.
+            # Exceptions: see generate.
+            # Side effects: none.
             model_id = "fake_model"
 
             def generate(
@@ -2452,6 +3604,14 @@ class TestMultiAgents:
                 stop_sequences=None,
                 tools_to_call_from=None,
             ):
+                # [FUNCTION DOC]
+                # HELPER: Returns delegation then final answer, as tool calls when tools_to_call_from is
+                #   given, else as code.
+                # Inputs: messages (list), stop_sequences (ignored), tools_to_call_from (list or None).
+                # Outputs: with fewer than 3 messages, a search_agent call with the question; afterwards a
+                #   final_answer with "Final report.".
+                # Exceptions: AssertionError if the later-stage messages lack the managed agent's report.
+                # Side effects: none.
                 if tools_to_call_from is not None:
                     if len(messages) < 3:
                         return ChatMessage(
@@ -2509,6 +3669,13 @@ final_answer("Final report.")
         manager_model = FakeModelMultiagentsManagerAgent()
 
         class FakeModelMultiagentsManagedAgent(Model):
+            # [CLASS DOC]
+            # HELPER: Fake managed-agent Model that immediately returns a final_answer report and content
+            #   containing FLAG1.
+            # Inputs: none (model_id "fake_model").
+            # Outputs: see generate.
+            # Exceptions: none raised directly.
+            # Side effects: none.
             model_id = "fake_model"
 
             def generate(
@@ -2517,6 +3684,13 @@ final_answer("Final report.")
                 tools_to_call_from=None,
                 stop_sequences=None,
             ):
+                # [FUNCTION DOC]
+                # HELPER: Returns content "Here is the secret content: FLAG1" with a final_answer call "Report
+                #   on the current US president".
+                # Inputs: messages, tools_to_call_from, stop_sequences (ignored).
+                # Outputs: assistant ChatMessage.
+                # Exceptions: none raised directly.
+                # Side effects: none.
                 return ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="Here is the secret content: FLAG1",
@@ -2572,6 +3746,13 @@ final_answer("Final report.")
 
 @pytest.fixture
 def prompt_templates():
+    # [FUNCTION DOC]
+    # HELPER: pytest fixture with minimal custom prompt templates.
+    # Inputs: none.
+    # Outputs: dict with system_prompt, managed_agent task/report, planning templates and final_answer
+    #   pre/post messages.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     return {
         "system_prompt": "This is a test system prompt.",
         "managed_agent": {"task": "Task for {{name}}: {{task}}", "report": "Report for {{name}}: {{final_answer}}"},
@@ -2594,8 +3775,20 @@ def prompt_templates():
     ],
 )
 def test_tool_calling_agents_raises_tool_call_error_being_invoked_with_wrong_arguments(arguments):
+    # [FUNCTION DOC]
+    # Checks execute_tool_call raises AgentToolCallError for arguments not matching the tool signature.
+    # Inputs: arguments (dict or list, parametrized).
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     @tool
     def _sample_tool(prompt: str) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Nested @tool echoing its prompt.
+        # Inputs: prompt (str).
+        # Outputs: the same string.
+        # Exceptions: none raised directly.
+        # Side effects: none.
         """Tool that returns same string
         Args:
             prompt: The string to return
@@ -2611,8 +3804,20 @@ def test_tool_calling_agents_raises_tool_call_error_being_invoked_with_wrong_arg
 
 
 def test_tool_calling_agents_raises_agent_execution_error_when_tool_raises():
+    # [FUNCTION DOC]
+    # Checks execute_tool_call wraps an exception raised inside a tool in AgentExecutionError.
+    # Inputs: none.
+    # Outputs: none.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     @tool
     def _sample_tool(_: str) -> float:
+        # [FUNCTION DOC]
+        # HELPER: Nested @tool that always divides by zero.
+        # Inputs: _ (str; ignored).
+        # Outputs: never returns.
+        # Exceptions: ZeroDivisionError always.
+        # Side effects: none.
         """Tool that fails
 
         Args:
