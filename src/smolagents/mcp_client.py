@@ -14,6 +14,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Description: Provides MCPClient, a wrapper that connects to Model Context Protocol servers and returns their
+#   tools as smolagents Tools.
+# Inputs: depends on warnings, smolagents.tools.Tool and, lazily, the optional mcpadapt package (and mcp for
+#   StdioServerParameters type hints).
+# Outputs: exports MCPClient (__all__).
+# Exceptions: none raised directly.
+# Side effects: none at import.
 
 from __future__ import annotations
 
@@ -31,6 +39,16 @@ if TYPE_CHECKING:
 
 
 class MCPClient:
+    # [CLASS DOC]
+    # Description: Connects to one or more MCP servers through mcpadapt's MCPAdapt with the SmolAgentsAdapter
+    #   and exposes the servers' tools as smolagents Tool objects. Connects immediately in the constructor;
+    #   usable as a context manager that yields the tool list and disconnects on exit.
+    # Inputs: server_parameters (StdioServerParameters, a dict with url and optional transport, or a list of
+    #   these); adapter_kwargs (dict or None, extra MCPAdapt kwargs); structured_output (bool or None; None
+    #   warns and means False). Key attributes: _adapter (MCPAdapt), _tools (list of Tool or None).
+    # Outputs: the instance; get_tools/__enter__ return the tool list.
+    # Exceptions: none raised directly.
+    # Side effects: spawns subprocesses or opens network connections to MCP servers.
     """Manages the connection to an MCP server and make its tools available to SmolAgents.
 
     Note: tools can only be accessed after the connection has been started with the
@@ -88,6 +106,21 @@ class MCPClient:
         adapter_kwargs: dict[str, Any] | None = None,
         structured_output: bool | None = None,
     ):
+        # [FUNCTION DOC]
+        # Description: Emits a FutureWarning and uses False when structured_output is None; imports mcpadapt
+        #   lazily; for a single dict, defaults its transport to streamable-http and validates it is sse or
+        #   streamable-http; builds the MCPAdapt adapter and connects.
+        # Inputs: server_parameters, adapter_kwargs (default None meaning empty), structured_output (default
+        #   None).
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if mcpadapt is not installed; ValueError for an unsupported
+        #   transport; connection errors from connect propagate.
+        # Side effects: warning emission; mutates a dict server_parameters by inserting the transport key;
+        #   connects to servers.
+        # KNOWN ISSUE: The warning says the default changes to True in version 1.25, but the package is 1.26
+        #   and the default is still False.
+        # KNOWN ISSUE: Transport defaulting/validation is skipped for dicts inside a list.
+        # KNOWN ISSUE: The caller's dict is mutated in place.
         # Handle future warning for structured_output default value change
         if structured_output is None:
             warnings.warn(
@@ -122,6 +155,13 @@ class MCPClient:
         self.connect()
 
     def connect(self):
+        # [FUNCTION DOC]
+        # Description: Enters the MCPAdapt context, which starts the server connections and returns the
+        #   adapted tools, and stores them.
+        # Inputs: none.
+        # Outputs: None.
+        # Exceptions: connection errors propagate.
+        # Side effects: opens connections/subprocesses; sets _tools.
         """Connect to the MCP server and initialize the tools."""
         self._tools: list[Tool] = self._adapter.__enter__()
 
@@ -131,10 +171,23 @@ class MCPClient:
         exc_value: BaseException | None = None,
         exc_traceback: TracebackType | None = None,
     ):
+        # [FUNCTION DOC]
+        # Description: Exits the MCPAdapt context, closing server connections, forwarding any exception info.
+        # Inputs: exc_type, exc_value, exc_traceback (optional, default None).
+        # Outputs: None.
+        # Exceptions: errors from the adapter's exit propagate.
+        # Side effects: closes connections/subprocesses.
+        # KNOWN ISSUE: _tools is not reset, so get_tools keeps returning tools that are no longer connected.
         """Disconnect from the MCP server"""
         self._adapter.__exit__(exc_type, exc_value, exc_traceback)
 
     def get_tools(self) -> list[Tool]:
+        # [FUNCTION DOC]
+        # Description: Returns the tool list obtained at connect time.
+        # Inputs: none.
+        # Outputs: list of Tool.
+        # Exceptions: ValueError if no tools have been loaded (_tools is None).
+        # Side effects: none.
         """The SmolAgents tools available from the MCP server.
 
         Note: for now, this always returns the tools available at the creation of the session,
@@ -154,6 +207,14 @@ class MCPClient:
         return self._tools
 
     def __enter__(self) -> list[Tool]:
+        # [FUNCTION DOC]
+        # Description: Context-manager entry; returns the already-loaded tool list (connection was made in the
+        #   constructor).
+        # Inputs: none.
+        # Outputs: list of Tool (or None if never connected).
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: The docstring says it connects, but it only returns the stored tools.
         """Connect to the MCP server and return the tools directly.
 
         Note that because of the `.connect` in the init, the mcp_client
@@ -167,5 +228,11 @@ class MCPClient:
         exc_value: BaseException | None,
         exc_traceback: TracebackType | None,
     ):
+        # [FUNCTION DOC]
+        # Description: Context-manager exit; disconnects, passing the exception info through.
+        # Inputs: exc_type, exc_value, exc_traceback.
+        # Outputs: None (exceptions are not suppressed).
+        # Exceptions: errors from disconnect propagate.
+        # Side effects: closes connections.
         """Disconnect from the MCP server."""
         self.disconnect(exc_type, exc_value, exc_traceback)

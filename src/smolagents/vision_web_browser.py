@@ -1,3 +1,17 @@
+# [MODULE DOC]
+# Description: Example/CLI script that drives a real Chrome browser with helium and a vision-capable
+#   CodeAgent. Defines browser tools (search_item_ctrl_f, go_back, close_popups), a screenshot step callback,
+#   driver/agent setup and the run_webagent/main entry points, plus prompt constants github_request,
+#   search_request and helium_instructions.
+# Inputs: depends on helium, PIL, python-dotenv, selenium and smolagents (CodeAgent, WebSearchTool, tool,
+#   ActionStep, load_model).
+# Outputs: module functions and constants listed above; a module-global driver is created only by
+#   run_webagent.
+# Exceptions: ImportError at import time if helium/selenium/dotenv are missing.
+# Side effects: none at import beyond creating tool objects; running main launches a browser.
+# KNOWN ISSUE: github_request is defined but never used.
+# KNOWN ISSUE: The tools rely on a global driver that only exists after run_webagent runs, so using them
+#   otherwise raises NameError.
 import argparse
 from io import BytesIO
 from time import sleep
@@ -25,6 +39,14 @@ Please navigate to https://en.wikipedia.org/wiki/Chicago and give me a sentence 
 
 
 def parse_arguments():
+    # [FUNCTION DOC]
+    # Description: Builds the command-line parser for the web-browser agent script and parses sys.argv.
+    # Inputs: none (reads process arguments). Defines optional positional prompt (default: the Wikipedia
+    #   search_request text), --model-type (default LiteLLMModel), --model-id (default gpt-4o), --provider,
+    #   --api-base and --api-key (all default None).
+    # Outputs: argparse.Namespace with attributes prompt, model_type, model_id, provider, api_base, api_key.
+    # Exceptions: SystemExit from argparse on invalid arguments or --help.
+    # Side effects: reads command-line arguments; argparse may print usage to stdout/stderr.
     parser = argparse.ArgumentParser(description="Run a web browser automation script with a specified model.")
     parser.add_argument(
         "prompt",
@@ -64,6 +86,19 @@ def parse_arguments():
 
 
 def save_screenshot(memory_step: ActionStep, agent: CodeAgent) -> None:
+    # [FUNCTION DOC]
+    # Description: Agent step callback. After waiting one second, takes a PNG screenshot of the current helium
+    #   browser, attaches a copy of it as the step's observation images, clears observation images of steps
+    #   that are two or more steps older to keep memory lean, and appends a 'Current url: ...' line to the
+    #   step observations (or sets it if observations were empty).
+    # Inputs: memory_step (ActionStep, the step just completed); agent (CodeAgent whose memory steps are
+    #   scanned).
+    # Outputs: None.
+    # Exceptions: none raised directly.
+    # Side effects: sleeps 1 second; mutates memory_step and older ActionSteps in agent memory; prints the
+    #   screenshot size to stdout; talks to the browser driver.
+    # KNOWN ISSUE: If helium has no driver, the screenshot branch is skipped but the URL update still
+    #   dereferences the driver and raises AttributeError.
     sleep(1.0)  # Let JavaScript animations happen before taking the screenshot
     driver = helium.get_driver()
     current_step = memory_step.step_number
@@ -85,6 +120,15 @@ def save_screenshot(memory_step: ActionStep, agent: CodeAgent) -> None:
 
 
 def _escape_xpath_string(s: str) -> str:
+    # [FUNCTION DOC]
+    # Description: HELPER: Turns an arbitrary string into an XPath string literal: wraps it in single quotes
+    #   if it has no single quote, otherwise in double quotes if it has no double quote, otherwise builds a
+    #   concat expression of single-quoted pieces split on single quotes, joined with a double-quoted single
+    #   quote.
+    # Inputs: s (str).
+    # Outputs: str, an XPath expression evaluating to s.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """
     Escapes a string for safe use in an XPath expression.
 
@@ -104,6 +148,17 @@ def _escape_xpath_string(s: str) -> str:
 
 @tool
 def search_item_ctrl_f(text: str, nth_result: int = 1) -> str:
+    # [FUNCTION DOC]
+    # Description: Agent tool (wrapped by the tool decorator) that finds all elements whose text contains the
+    #   given text using an escaped XPath query, scrolls the nth match into view, and reports the match count.
+    # Inputs: text (str, text to search); nth_result (int, default 1, 1-based occurrence).
+    # Outputs: str like Found N matches for '<text>'.Focused on element K of N.
+    # Exceptions: Exception if nth_result exceeds the number of matches; NameError if the module-level driver
+    #   has not been set yet.
+    # Side effects: executes JavaScript in the browser (scrolls the page); uses the global driver.
+    # KNOWN ISSUE: nth_result of zero or negative is not rejected and selects elements from the end of the
+    #   list (and with no matches it raises IndexError).
+    # KNOWN ISSUE: The two sentences in the result string are concatenated without a space.
     """
     Searches for text on the current page via Ctrl + F and jumps to the nth occurrence.
     Args:
@@ -123,12 +178,25 @@ def search_item_ctrl_f(text: str, nth_result: int = 1) -> str:
 
 @tool
 def go_back() -> None:
+    # [FUNCTION DOC]
+    # Description: Agent tool that navigates the browser back to the previous page.
+    # Inputs: none.
+    # Outputs: None.
+    # Exceptions: NameError if the global driver is not set; driver errors propagate.
+    # Side effects: browser navigation via the global driver.
     """Goes back to previous page."""
     driver.back()
 
 
 @tool
 def close_popups() -> str:
+    # [FUNCTION DOC]
+    # Description: Agent tool that sends an Escape key press to the browser to dismiss modals/pop-ups.
+    # Inputs: none.
+    # Outputs: None.
+    # Exceptions: NameError if the global driver is not set.
+    # Side effects: sends a key event to the browser through the global driver.
+    # KNOWN ISSUE: Annotated to return str but always returns None.
     """
     Closes any visible modal or pop-up on the page. Use this to dismiss pop-up windows! This does not work on cookie consent banners.
     """
@@ -136,6 +204,13 @@ def close_popups() -> str:
 
 
 def initialize_driver():
+    # [FUNCTION DOC]
+    # Description: Starts a visible (non-headless) Chrome browser through helium with fixed window size
+    #   1000x1350 at position 0,0, device scale factor 1 and the PDF viewer disabled.
+    # Inputs: none.
+    # Outputs: the Selenium WebDriver returned by helium.start_chrome.
+    # Exceptions: Selenium/helium errors propagate (e.g. Chrome not installed).
+    # Side effects: launches a Chrome process.
     """Initialize the Selenium WebDriver."""
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--force-device-scale-factor=1")
@@ -146,6 +221,14 @@ def initialize_driver():
 
 
 def initialize_agent(model):
+    # [FUNCTION DOC]
+    # Description: Creates the CodeAgent used for web browsing with tools WebSearchTool, go_back, close_popups
+    #   and search_item_ctrl_f, helium as an authorized import, save_screenshot as step callback, 20 max steps
+    #   and verbosity level 2.
+    # Inputs: model (a smolagents Model).
+    # Outputs: CodeAgent instance.
+    # Exceptions: none raised directly.
+    # Side effects: none beyond agent construction.
     """Initialize the CodeAgent with the specified model."""
     return CodeAgent(
         tools=[WebSearchTool(), go_back, close_popups, search_item_ctrl_f],
@@ -222,6 +305,16 @@ def run_webagent(
     api_base: str | None = None,
     api_key: str | None = None,
 ) -> None:
+    # [FUNCTION DOC]
+    # Description: End-to-end run: loads .env variables, builds the model via load_model, starts the browser
+    #   (stored in the module-global driver used by the tools), creates the agent, pre-imports helium into the
+    #   agent's Python executor and runs the agent on the prompt followed by the helium usage instructions.
+    # Inputs: prompt (str); model_type (str, model class name); model_id (str); provider, api_base, api_key
+    #   (str or None, default None).
+    # Outputs: None (the agent result is discarded).
+    # Exceptions: errors from model loading, browser start or agent run propagate.
+    # Side effects: reads .env into environment variables; sets the global driver; launches Chrome; makes
+    #   model API calls; leaves the browser running.
     # Load environment variables
     load_dotenv()
 
@@ -238,6 +331,12 @@ def run_webagent(
 
 
 def main() -> None:
+    # [FUNCTION DOC]
+    # Description: CLI entry point: parses arguments and calls run_webagent with them.
+    # Inputs: none (command-line arguments).
+    # Outputs: None.
+    # Exceptions: SystemExit from argument parsing; errors from run_webagent propagate.
+    # Side effects: see run_webagent.
     # Parse command line arguments
     args = parse_arguments()
     run_webagent(args.prompt, args.model_type, args.model_id, args.provider, args.api_base, args.api_key)

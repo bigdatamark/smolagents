@@ -1,9 +1,26 @@
+# [MODULE DOC]
+# Description: Checks smolagents can be imported in a fresh virtual environment with no optional extras
+#   installed.
+# Inputs: depends on os, subprocess, tempfile and the uv CLI.
+# Outputs: test_import_smolagents_without_extras.
+# Exceptions: none raised directly.
+# Side effects: none at import.
 import os
 import subprocess
 import tempfile
 
 
 def test_import_smolagents_without_extras(monkeypatch):
+    # [FUNCTION DOC]
+    # Description: Unsets VIRTUAL_ENV, creates a uv venv in a temp dir, installs the local package (current
+    #   directory) into it, runs import smolagents with that interpreter and asserts exit code 0, showing the
+    #   last stderr line on failure.
+    # Inputs: monkeypatch (pytest fixture).
+    # Outputs: none (passes or fails via assertions).
+    # Exceptions: AssertionError on import failure; CalledProcessError if venv creation or install fails;
+    #   FileNotFoundError if uv is missing.
+    # Side effects: spawns processes, may download packages over the network, creates and deletes a temp dir;
+    #   must be run from the repo root.
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     with tempfile.TemporaryDirectory() as temp_dir:
         # Create a virtual environment

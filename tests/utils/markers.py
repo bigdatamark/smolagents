@@ -12,6 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Description: HELPER: Defines reusable pytest skip markers: require_run_all (skips unless the RUN_ALL
+#   environment variable is set to a non-empty value), require_soundfile and require_torch (skip when the
+#   soundfile or torch package cannot be found).
+# Inputs: depends on os, importlib.util.find_spec and pytest.
+# Outputs: the three marker objects.
+# Exceptions: none raised directly.
+# Side effects: reads the RUN_ALL environment variable and probes installed packages at import time.
 """Markers for tests ."""
 
 import os

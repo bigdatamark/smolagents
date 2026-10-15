@@ -14,6 +14,15 @@
 # limitations under the License.
 
 # Source: https://github.com/Arize-ai/openinference/blob/main/python/instrumentation/openinference-instrumentation-smolagents/tests/openinference/instrumentation/smolagents/test_instrumentor.py
+# [MODULE DOC]
+# Description: OpenTelemetry instrumentation test (adapted from openinference): checks that a model call made
+#   while SmolagentsInstrumentor is active produces one successful span. Skips the whole module if
+#   opentelemetry or openinference smolagents instrumentation is missing.
+# Inputs: depends on pytest, opentelemetry sdk, openinference.instrumentation.smolagents,
+#   InferenceClientModel.
+# Outputs: fixtures and TestOpenTelemetry.
+# Exceptions: pytest Skipped at import when dependencies are missing.
+# Side effects: none at import.
 
 from typing import Generator
 
@@ -40,11 +49,24 @@ from smolagents.models import InferenceClientModel
 
 @pytest.fixture
 def in_memory_span_exporter() -> InMemorySpanExporter:
+    # [FUNCTION DOC]
+    # Description: HELPER: Fixture creating an in-memory span exporter.
+    # Inputs: none.
+    # Outputs: InMemorySpanExporter.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     return InMemorySpanExporter()
 
 
 @pytest.fixture
 def tracer_provider(in_memory_span_exporter: InMemorySpanExporter) -> trace_api.TracerProvider:
+    # [FUNCTION DOC]
+    # Description: HELPER: Fixture creating a TracerProvider with an empty resource that sends spans
+    #   synchronously to the exporter.
+    # Inputs: in_memory_span_exporter.
+    # Outputs: TracerProvider.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     resource = Resource(attributes={})
     tracer_provider = trace_sdk.TracerProvider(resource=resource)
     span_processor = SimpleSpanProcessor(span_exporter=in_memory_span_exporter)
@@ -57,6 +79,13 @@ def instrument(
     tracer_provider: trace_api.TracerProvider,
     in_memory_span_exporter: InMemorySpanExporter,
 ) -> Generator[None, None, None]:
+    # [FUNCTION DOC]
+    # Description: HELPER: Autouse fixture that instruments smolagents with the tracer provider (skipping
+    #   dependency check), and after the test uninstruments and clears recorded spans.
+    # Inputs: tracer_provider; in_memory_span_exporter.
+    # Outputs: yields None.
+    # Exceptions: none raised directly.
+    # Side effects: globally patches smolagents classes during each test.
     SmolagentsInstrumentor().instrument(tracer_provider=tracer_provider, skip_dep_check=True)
     yield
     SmolagentsInstrumentor().uninstrument()
@@ -65,7 +94,20 @@ def instrument(
 
 @require_run_all
 class TestOpenTelemetry:
+    # [CLASS DOC]
+    # Description: Telemetry test class, gated by require_run_all.
+    # Inputs: none.
+    # Outputs: test outcomes.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     def test_model(self, in_memory_span_exporter: InMemorySpanExporter):
+        # [FUNCTION DOC]
+        # Description: Calls InferenceClientModel with a single user question and checks exactly one finished
+        #   span named InferenceClientModel.generate with OK status and non-empty attributes.
+        # Inputs: self; in_memory_span_exporter.
+        # Outputs: none (passes or fails via assertions).
+        # Exceptions: AssertionError on failure.
+        # Side effects: network call to the Hugging Face inference API (needs a token).
         model = InferenceClientModel()
         _ = model(
             messages=[

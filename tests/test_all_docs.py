@@ -12,6 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Description: Executes the Python code blocks of every markdown file in docs/source/en as a script, one test
+#   per doc file, to ensure the documentation examples run. Slow and needs API keys, so the test class is
+#   gated by require_run_all.
+# Inputs: depends on pytest, python-dotenv, subprocess and the docs tree; environment variables HF_TOKEN and
+#   ANTHROPIC_API_KEY.
+# Outputs: SubprocessCallException, run_command, DocCodeExtractor, TestDocs and the pytest_generate_tests
+#   hook.
+# Exceptions: none raised directly.
+# Side effects: test collection may create a temporary directory and load .env (see pytest_generate_tests).
 
 import ast
 import os
@@ -29,10 +39,25 @@ from .utils.markers import require_run_all
 
 
 class SubprocessCallException(Exception):
+    # [CLASS DOC]
+    # Description: HELPER: Exception raised by run_command when the subprocess exits non-zero.
+    # Inputs: a message string.
+    # Outputs: exception instance.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     pass
 
 
 def run_command(command: list[str], return_stdout=False, env=None):
+    # [FUNCTION DOC]
+    # Description: HELPER: Runs a command with stderr merged into stdout, converting Path items to strings,
+    #   and optionally returns the decoded output.
+    # Inputs: command (list of str or Path); return_stdout (bool, default False); env (dict or None, default a
+    #   copy of os.environ).
+    # Outputs: decoded UTF-8 output when return_stdout is True, otherwise None.
+    # Exceptions: SubprocessCallException (chained from CalledProcessError) containing the command and its
+    #   output on non-zero exit; FileNotFoundError if the executable is missing.
+    # Side effects: spawns a subprocess; mutates the command list in place (Path to str).
     """
     Runs command with subprocess.check_output and returns stdout if requested.
     Properly captures and handles errors during command execution.
@@ -57,10 +82,26 @@ def run_command(command: list[str], return_stdout=False, env=None):
 
 
 class DocCodeExtractor:
+    # [CLASS DOC]
+    # Description: HELPER: Static helpers to pull Python code fences out of markdown and write them to a
+    #   script file.
+    # Inputs: no constructor args.
+    # Outputs: instance.
+    # Exceptions: none raised directly.
+    # Side effects: none.
     """Handles extraction and validation of Python code from markdown files."""
 
     @staticmethod
     def extract_python_code(content: str) -> list[str]:
+        # [FUNCTION DOC]
+        # Description: HELPER: Finds all fenced blocks tagged python or py and returns their stripped bodies
+        #   in order.
+        # Inputs: content (str, markdown).
+        # Outputs: list of str.
+        # Exceptions: none raised directly.
+        # Side effects: none.
+        # KNOWN ISSUE: Fences must be immediately followed by a newline and closed by a newline plus fence;
+        #   indented fences or fences with extra attributes are not matched.
         """Extract Python code blocks from markdown content."""
         pattern = r"```(?:python|py)\n(.*?)\n```"
         matches = re.finditer(pattern, content, re.DOTALL)
@@ -68,6 +109,13 @@ class DocCodeExtractor:
 
     @staticmethod
     def create_test_script(code_blocks: list[str], tmp_dir: str) -> Path:
+        # [FUNCTION DOC]
+        # Description: HELPER: Joins the code blocks with blank lines and writes them to test_script.py in the
+        #   given directory.
+        # Inputs: code_blocks (list of str); tmp_dir (str).
+        # Outputs: Path of the written file.
+        # Exceptions: AssertionError if the combined code is empty; OSError on write failure.
+        # Side effects: writes (overwrites) a file.
         """Create a temporary Python script from code blocks."""
         combined_code = "\n\n".join(code_blocks)
         assert len(combined_code) > 0, "Code is empty!"
@@ -82,10 +130,24 @@ class DocCodeExtractor:
 # Skip: slow tests + require API keys
 @require_run_all
 class TestDocs:
+    # [CLASS DOC]
+    # Description: Test class running each documentation file's code; gated by require_run_all.
+    # Inputs: class attributes set by setup_class: _tmpdir, launch_args (python3), docs_dir, extractor,
+    #   md_files.
+    # Outputs: test outcomes.
+    # Exceptions: AssertionError on failure.
+    # Side effects: none.
     """Test case for documentation code testing."""
 
     @classmethod
     def setup_class(cls):
+        # [FUNCTION DOC]
+        # Description: Creates a temp dir, sets the docs directory, loads .env and collects all .md/.mdx files
+        #   under docs/source/en.
+        # Inputs: cls.
+        # Outputs: None.
+        # Exceptions: ValueError if the docs dir is missing or has no markdown files.
+        # Side effects: creates a temp directory; loads .env into the environment; sets class attributes.
         cls._tmpdir = tempfile.mkdtemp()
         cls.launch_args = ["python3"]
         cls.docs_dir = Path(__file__).parent.parent / "docs" / "source" / "en"
@@ -102,10 +164,29 @@ class TestDocs:
 
     @classmethod
     def teardown_class(cls):
+        # [FUNCTION DOC]
+        # Description: Removes the class temp directory.
+        # Inputs: cls.
+        # Outputs: None.
+        # Exceptions: OSError if removal fails.
+        # Side effects: deletes files.
         shutil.rmtree(cls._tmpdir)
 
     @pytest.mark.timeout(100)
     def test_single_doc(self, doc_path: Path):
+        # [FUNCTION DOC]
+        # Description: Extracts the doc's Python blocks, drops blocks containing excluded snippets (expensive
+        #   or non-runnable examples), skips if none remain, checks each block parses, substitutes HF token,
+        #   Anthropic key and username placeholders, writes all blocks into one script and runs it with
+        #   python3, failing the test on any error.
+        # Inputs: doc_path (Path, parametrized per markdown file).
+        # Outputs: none; skipped if no blocks.
+        # Exceptions: SyntaxError from parsing; pytest failure (Failed) on execution errors; Skipped when no
+        #   code.
+        # Side effects: writes a script; spawns python3 that may make network/API calls; prints the code.
+        # KNOWN ISSUE: If HF_TOKEN or ANTHROPIC_API_KEY is unset the replace call receives None and raises
+        #   TypeError, reported only as an 'Unexpected error' failure.
+        # KNOWN ISSUE: Unused loop index variable in the syntax-check loop.
         """Test a single documentation file."""
         with open(doc_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -155,6 +236,13 @@ class TestDocs:
 
     @pytest.fixture(autouse=True)
     def _setup(self):
+        # [FUNCTION DOC]
+        # Description: HELPER: Autouse fixture: ensures the temp dir exists before each test and deletes the
+        #   files in it afterwards.
+        # Inputs: self.
+        # Outputs: yields None.
+        # Exceptions: OSError on file operations.
+        # Side effects: creates/deletes files.
         """Fixture to ensure temporary directory exists for each test."""
         os.makedirs(self._tmpdir, exist_ok=True)
         yield
@@ -164,6 +252,16 @@ class TestDocs:
 
 
 def pytest_generate_tests(metafunc):
+    # [FUNCTION DOC]
+    # Description: Pytest hook that parametrizes any test requesting doc_path with every collected markdown
+    #   file (ids are file stems), calling the class's setup_class first if md_files is not yet set.
+    # Inputs: metafunc (pytest Metafunc).
+    # Outputs: None.
+    # Exceptions: ValueError from setup_class.
+    # Side effects: may create a temp dir and load .env during collection.
+    # KNOWN ISSUE: The temp dir created here during collection is replaced by the one created again in
+    #   setup_class and is never removed; collection also runs even when RUN_ALL is unset, so missing docs
+    #   would error at collection time.
     """Generate test cases for each markdown file."""
     if "doc_path" in metafunc.fixturenames:
         test_class = metafunc.cls
