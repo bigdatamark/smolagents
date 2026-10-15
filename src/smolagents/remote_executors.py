@@ -14,6 +14,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Purpose: remote (sandboxed) Python code executors for code agents. Defines the abstract base
+#   RemotePythonExecutor and four concrete backends: E2BExecutor (E2B sandbox SDK), DockerExecutor (local
+#   Docker container running Jupyter Kernel Gateway), ModalExecutor (Modal sandbox running Jupyter Kernel
+#   Gateway) and BlaxelExecutor (Blaxel sandbox running a Jupyter image). The Jupyter-based backends share
+#   module-level helpers that create a kernel over HTTP and run code over the kernel websocket protocol.
+# Exports: __all__ lists BlaxelExecutor, E2BExecutor, ModalExecutor, DockerExecutor (RemotePythonExecutor is
+#   also importable). Depends on requests, PIL, smolagents FinalAnswerTool, CodeOutput/PythonExecutor,
+#   LogLevel, SafeSerializer/SerializationError, Tool/get_tools_definition_code, AgentError; optional backends
+#   import e2b_code_interpreter, docker, modal, blaxel and websocket lazily.
+# Final answer protocol: the final_answer tool is patched so calling it raises a remote FinalAnswerException
+#   whose value is a prefixed string ('safe:' + JSON or 'pickle:' + base64 pickle); executors detect that
+#   exception name in the remote error and deserialize the value into the final answer.
+# Exceptions: none raised at import time (missing python-dotenv is ignored).
+# Side effects: on import, if python-dotenv is installed, load_dotenv() reads a .env file into os.environ.
 import base64
 import inspect
 import json
@@ -51,6 +66,17 @@ except ModuleNotFoundError:
 
 
 class RemotePythonExecutor(PythonExecutor):
+    # [CLASS DOC]
+    # Abstract base for executors that run agent code in a remote Python kernel/sandbox. Subclasses must
+    #   implement run_code_raise_errors; this class supplies tool/variable shipping, package installation,
+    #   final-answer patching and final-answer deserialization.
+    # Inputs (constructor): additional_imports (list of str, packages to install), logger (object with
+    #   log/log_error), allow_pickle (bool, default False, permits pickle fallback when
+    #   serializing/deserializing).
+    # Key attributes: FINAL_ANSWER_EXCEPTION (class constant, the string 'FinalAnswerException' used to
+    #   recognize the final answer in remote errors), additional_imports, logger, allow_pickle,
+    #   installed_packages (list of str).
+    # Outputs: n/a. Exceptions: see methods. Side effects: see methods.
     """
     Executor of Python code in a remote environment.
 
@@ -73,6 +99,13 @@ class RemotePythonExecutor(PythonExecutor):
         logger,
         allow_pickle: bool = False,
     ):
+        # [FUNCTION DOC]
+        # Stores constructor arguments and initializes installed_packages to an empty list. Does not install
+        #   anything itself.
+        # Inputs: additional_imports (list of str), logger, allow_pickle (bool, default False).
+        # Outputs: none.
+        # Exceptions: none raised directly (AttributeError if logger lacks log).
+        # Side effects: logs 'Initializing executor, hold on...' via logger.log.
         self.additional_imports = additional_imports
         self.logger = logger
         self.allow_pickle = allow_pickle
@@ -80,6 +113,13 @@ class RemotePythonExecutor(PythonExecutor):
         self.installed_packages = []
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Abstract hook: subclasses execute code remotely and return a CodeOutput (output, logs,
+        #   is_final_answer), raising on remote errors other than the final-answer signal.
+        # Inputs: code (str, Python source to run).
+        # Outputs: CodeOutput (in subclasses).
+        # Exceptions: always raises NotImplementedError in the base class.
+        # Side effects: none.
         """
         Execute Python code in the remote environment and return the result.
 
@@ -92,6 +132,19 @@ class RemotePythonExecutor(PythonExecutor):
         raise NotImplementedError
 
     def send_tools(self, tools: dict[str, Tool]):
+        # [FUNCTION DOC]
+        # Ships tools to the remote environment. If a 'final_answer' tool is present, patches it in place so
+        #   it raises FinalAnswerException. Collects every requirement from each tool's serialized dict,
+        #   excluding already-installed packages and 'smolagents'; maps 'PIL' to 'pillow'; installs the
+        #   remaining set via install_packages and appends the result to installed_packages. Then generates
+        #   the tool definition code and, if non-empty, runs it remotely and logs its logs.
+        # Inputs: tools (dict of tool name to Tool).
+        # Outputs: none.
+        # Exceptions: propagates errors from install_packages / run_code_raise_errors (e.g. AgentError) and
+        #   tool.to_dict.
+        # Side effects: mutates the final_answer tool instance's class, mutates installed_packages, remote
+        #   installs and code execution, logging.
+        # KNOWN ISSUE: package set ordering is arbitrary (set), so the pip command order is nondeterministic.
         if "final_answer" in tools:
             self._patch_final_answer_with_exception(tools["final_answer"])
         # Install tool packages
@@ -113,6 +166,18 @@ class RemotePythonExecutor(PythonExecutor):
             self.logger.log(code_output.logs)
 
     def send_variables(self, variables: dict[str, Any]):
+        # [FUNCTION DOC]
+        # Injects variables into the remote kernel namespace. No-op for an empty/falsy dict. Otherwise
+        #   serializes the dict with SafeSerializer (pickle fallback only if allow_pickle), then runs remote
+        #   code consisting of the deserializer helper source, a call that deserializes the repr of the
+        #   payload into a dict, and an update of the remote locals with it (at kernel top level locals are
+        #   the globals).
+        # Inputs: variables (dict of name to value).
+        # Outputs: none.
+        # Exceptions: SerializationError if a value cannot be safely serialized with allow_pickle False;
+        #   errors from run_code_raise_errors propagate.
+        # Side effects: remote code execution that defines/overwrites names (including the helper names
+        #   vars_dict and _deserialize) in the remote namespace.
         """Send variables to the kernel namespace using SafeSerializer.
 
         Uses prefix-based format ("safe:..." or "pickle:...").
@@ -131,16 +196,46 @@ locals().update(vars_dict)
         self.run_code_raise_errors(code)
 
     def __call__(self, code_action: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Makes the executor callable: delegates directly to run_code_raise_errors.
+        # Inputs: code_action (str, code to run).
+        # Outputs: the CodeOutput from run_code_raise_errors.
+        # Exceptions: whatever run_code_raise_errors raises.
+        # Side effects: remote code execution.
         """Run the code and determine if it is the final answer."""
         return self.run_code_raise_errors(code_action)
 
     def install_packages(self, additional_imports: list[str]):
+        # [FUNCTION DOC]
+        # Installs packages remotely by running a notebook-style shell command (pip install followed by space-
+        #   joined names) through run_code_raise_errors and logging its logs; does nothing remotely if the
+        #   list is empty.
+        # Inputs: additional_imports (list of str).
+        # Outputs: the same list passed in (assumed installed; success is not verified).
+        # Exceptions: errors from run_code_raise_errors propagate.
+        # Side effects: remote pip install, logging.
+        # KNOWN ISSUE: returns the input list even if pip fails without raising, so installed_packages may be
+        #   inaccurate.
         if additional_imports:
             code_output = self.run_code_raise_errors(f"!pip install {' '.join(additional_imports)}")
             self.logger.log(code_output.logs)
         return additional_imports
 
     def _patch_final_answer_with_exception(self, final_answer_tool: FinalAnswerTool):
+        # [FUNCTION DOC]
+        # HELPER: Replaces the class of the given final_answer tool instance with a dynamically created
+        #   subclass whose forward wraps the original: it calls the original forward (renamed _forward),
+        #   serializes the result into a prefixed string and raises FinalAnswerException carrying it. Because
+        #   tool code is regenerated from source and sent remotely, it sets a source attribute on the new
+        #   forward (with the allow_pickle value textually baked in instead of the closure variable) and on
+        #   _forward (original source with the method renamed).
+        # Inputs: final_answer_tool (FinalAnswerTool instance).
+        # Outputs: none.
+        # Exceptions: OSError/TypeError from inspect.getsource if the original forward source is unavailable.
+        # Side effects: mutates final_answer_tool's class; sets source attributes on function objects (the
+        #   original forward function object is shared, so its source attribute is overwritten globally).
+        # KNOWN ISSUE: the class docstring says pickle fallback happens 'with warning', but no warning is
+        #   emitted here.
         """Patch the FinalAnswerTool to raise an exception.
 
         This is necessary because the remote executors
@@ -157,6 +252,11 @@ locals().update(vars_dict)
 
         # Create a new class that inherits from the original FinalAnswerTool
         class _FinalAnswerTool(final_answer_tool.__class__):
+            # [CLASS DOC]
+            # HELPER: Empty dynamic subclass of the tool's original class; gets forward and _forward
+            #   attributes assigned after creation.
+            # Inputs: none. Attributes: forward (patched), _forward (original). Outputs/Exceptions/Side
+            #   effects: none.
             pass
 
         # Add a new forward method that raises the FinalAnswerException
@@ -166,6 +266,17 @@ locals().update(vars_dict)
         allow_pickle_setting = self.allow_pickle
 
         def forward(self, *args, **kwargs) -> Any:
+            # [FUNCTION DOC]
+            # HELPER: Patched tool entry point (also executed remotely from its source). Calls the original
+            #   forward with all arguments, serializes the result, and raises a locally defined
+            #   FinalAnswerException with the serialized string. All helpers are defined inline because it
+            #   must be self-contained when sent as source.
+            # Inputs: self (tool), any positional/keyword args forwarded to the original forward.
+            # Outputs: never returns normally.
+            # Exceptions: always raises FinalAnswerException (a BaseException subclass); raises the local
+            #   SerializationError if the result cannot be safely serialized and pickle is disallowed.
+            # Side effects: imports base64, json, io (and lazily PIL, datetime, decimal, pathlib, numpy,
+            #   dataclasses, pickle).
             import base64
             import json
             from io import BytesIO
@@ -174,9 +285,25 @@ locals().update(vars_dict)
             ALLOW_PICKLE = allow_pickle_setting
 
             class SerializationError(Exception):
+                # [CLASS DOC]
+                # HELPER: Local exception type signaling an object cannot be converted to a JSON-safe form
+                #   (redefined inline so the remote source has no external references).
+                # Inputs: message. Outputs/Side effects: none.
                 pass
 
             def _to_json_safe(obj):
+                # [FUNCTION DOC]
+                # HELPER: Recursively converts an object to JSON-compatible data. Primitives (str, int, float,
+                #   bool, None) are returned as-is; dicts with all-string keys map values recursively, else
+                #   become a tagged list of key/value pairs; lists map recursively; tuple, set, frozenset,
+                #   bytes (base64), complex, PIL images (PNG base64), datetime, date, time, timedelta (total
+                #   seconds), Decimal, Path, numpy arrays (list + dtype) and dataclass instances (class name,
+                #   module and field data) become dicts tagged with a type marker key; numpy scalars become
+                #   Python scalars.
+                # Inputs: obj (any).
+                # Outputs: JSON-safe structure.
+                # Exceptions: SerializationError (local) for unsupported types.
+                # Side effects: none (lazy imports only).
                 if isinstance(obj, (str, int, float, bool, type(None))):
                     return obj
                 elif isinstance(obj, dict):
@@ -256,6 +383,16 @@ locals().update(vars_dict)
                 raise SerializationError(f"Cannot safely serialize object of type {type(obj).__name__}")
 
             def _serialize_with_fallback(obj):
+                # [FUNCTION DOC]
+                # HELPER: Serializes obj to the prefixed wire format. With pickle disallowed: 'safe:' plus
+                #   JSON of the JSON-safe form. With pickle allowed: tries the same; on SerializationError
+                #   falls back to 'pickle:' plus base64 pickle; if pickling fails (PicklingError, TypeError,
+                #   AttributeError) falls back to 'safe:' plus JSON of the string form.
+                # Inputs: obj (any).
+                # Outputs: str with 'safe:' or 'pickle:' prefix.
+                # Exceptions: SerializationError when pickle disallowed and object unsupported; json errors
+                #   propagate.
+                # Side effects: none.
                 """Serialize with safe method, fallback to pickle if allowed."""
                 import pickle
 
@@ -277,7 +414,18 @@ locals().update(vars_dict)
                             return "safe:" + json.dumps(str(obj))
 
             class FinalAnswerException(BaseException):
+                # [CLASS DOC]
+                # HELPER: Local BaseException subclass used as a control-flow signal carrying the serialized
+                #   final answer; its class name is matched by executors against FINAL_ANSWER_EXCEPTION.
+                # Inputs (constructor): value (serialized str). Attributes: value. Side effects: none.
                 def __init__(self, value):
+                    # [FUNCTION DOC]
+                    # HELPER: Stores the serialized value on the exception.
+                    # Inputs: value (str). Outputs: none. Exceptions: none raised directly. Side effects: sets
+                    #   self.value.
+                    # Note: the base initializer is not called, but BaseException construction still records
+                    #   the value as its argument, so the remote error value string equals the serialized
+                    #   payload.
                     self.value = value
 
             raise FinalAnswerException(_serialize_with_fallback(self._forward(*args, **kwargs)))
@@ -305,6 +453,15 @@ locals().update(vars_dict)
 
     @staticmethod
     def _deserialize_final_answer(encoded_value: str, allow_pickle: bool = False) -> Any:
+        # [FUNCTION DOC]
+        # HELPER: Static method decoding a final-answer string. 'safe:' prefix: parse the rest as JSON and
+        #   rebuild objects via SafeSerializer.from_json_safe. 'pickle:' prefix: if allowed, base64-decode and
+        #   unpickle the rest.
+        # Inputs: encoded_value (str), allow_pickle (bool, default False).
+        # Outputs: the deserialized Python object.
+        # Exceptions: SerializationError if pickle payload is given with allow_pickle False or prefix is
+        #   unknown; json/base64/pickle errors propagate.
+        # Side effects: unpickling may execute arbitrary code when allowed.
         """Deserialize final answer with format detection.
 
         Accepts explicit prefix-based formats only:
@@ -333,6 +490,12 @@ locals().update(vars_dict)
 
 
 class E2BExecutor(RemotePythonExecutor):
+    # [CLASS DOC]
+    # Remote executor backed by an E2B code-interpreter sandbox.
+    # Inputs (constructor): additional_imports, logger, allow_pickle (as base), **kwargs passed to the E2B
+    #   Sandbox constructor/factory.
+    # Key attributes: sandbox (E2B Sandbox instance), installed_packages.
+    # Exceptions/Side effects: see methods.
     """
     Remote Python code executor in an E2B sandbox.
 
@@ -355,6 +518,16 @@ class E2BExecutor(RemotePythonExecutor):
         allow_pickle: bool = False,
         **kwargs,
     ):
+        # [FUNCTION DOC]
+        # Initializes base state, imports e2b_code_interpreter.Sandbox, creates a sandbox (via the create
+        #   factory when available for e2b v2, else the constructor for v1) with kwargs, installs
+        #   additional_imports, and logs readiness.
+        # Inputs: additional_imports (list of str), logger, allow_pickle (bool, default False), **kwargs for
+        #   Sandbox.
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError with install hint if e2b is missing; sandbox creation and install
+        #   errors propagate.
+        # Side effects: creates a remote sandbox (network), remote pip install, logging.
         super().__init__(additional_imports, logger, allow_pickle)
         try:
             from e2b_code_interpreter import Sandbox
@@ -372,6 +545,17 @@ class E2BExecutor(RemotePythonExecutor):
         self.logger.log("E2B is running", level=LogLevel.INFO)
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Runs code in the sandbox and joins stdout log entries with newlines as logs. On error: if the error
+        #   name equals FINAL_ANSWER_EXCEPTION, deserializes its value and returns it as a final answer;
+        #   otherwise raises AgentError with logs, error name, value and traceback. On success: returns None
+        #   output if there are no results; else for the first main result returns a PIL image decoded from
+        #   jpeg or png base64 data if present, otherwise the first non-None of chart, data, html, javascript,
+        #   json, latex, markdown, pdf, svg, text; else None output.
+        # Inputs: code (str, Python source to run).
+        # Outputs: CodeOutput (output, logs, is_final_answer).
+        # Exceptions: AgentError on non-final remote errors; SerializationError on bad final answer payloads.
+        # Side effects: remote execution (network).
         """
         Execute Python code in the E2B sandbox and return the result.
 
@@ -436,6 +620,13 @@ class E2BExecutor(RemotePythonExecutor):
         return CodeOutput(output=None, logs=execution_logs, is_final_answer=False)
 
     def cleanup(self):
+        # [FUNCTION DOC]
+        # Kills the sandbox if the sandbox attribute exists, logs start/completion and deletes the attribute.
+        # Inputs: none. Outputs: none.
+        # Exceptions: none; any exception is caught and logged with log_error.
+        # Side effects: remote sandbox termination, logging, removes self.sandbox.
+        # KNOWN ISSUE: unlike other executors, E2BExecutor defines no delete method, so callers using delete()
+        #   fail.
         """Clean up the E2B sandbox and resources."""
         try:
             if hasattr(self, "sandbox"):
@@ -448,6 +639,14 @@ class E2BExecutor(RemotePythonExecutor):
 
 
 def _websocket_send_execute_request(code: str, ws) -> str:
+    # [FUNCTION DOC]
+    # HELPER: Builds a Jupyter messaging protocol (v5.0) execute_request with a fresh random msg_id and
+    #   session id, anonymous username, non-silent, history stored, stdin disallowed, and sends it as JSON
+    #   over the websocket.
+    # Inputs: code (str), ws (websocket object with send).
+    # Outputs: the msg_id string, used to match replies.
+    # Exceptions: websocket send errors propagate.
+    # Side effects: network write on ws.
     """Send code execution request to kernel."""
     import uuid
 
@@ -479,6 +678,19 @@ def _websocket_send_execute_request(code: str, ws) -> str:
 
 
 def _websocket_run_code_raise_errors(code: str, ws, logger, allow_pickle: bool = False) -> CodeOutput:
+    # [FUNCTION DOC]
+    # HELPER: Executes code on a Jupyter kernel over a websocket. Sends an execute request, then reads
+    #   messages, ignoring those whose parent msg_id differs. Accumulates stream text as logs; execute_result
+    #   sets the result to the text/plain data; error messages named FINAL_ANSWER_EXCEPTION set the
+    #   deserialized final answer and flag it, other errors raise AgentError with the joined traceback; a
+    #   status message with idle state ends the loop.
+    # Inputs: code (str), ws (websocket), logger, allow_pickle (bool, default False).
+    # Outputs: CodeOutput(output=result or None, logs=concatenated stream text, is_final_answer flag).
+    # Exceptions: any exception is logged via logger.log_error then re-raised (AgentError, SerializationError,
+    #   websocket and JSON errors).
+    # Side effects: network I/O on ws, logging.
+    # KNOWN ISSUE: no timeout; blocks forever if the kernel never reports idle. execute_result outputs are
+    #   only plain text (rich outputs such as images are lost unless returned via final_answer).
     """Run code over a websocket.
 
     Args:
@@ -530,6 +742,17 @@ def _websocket_run_code_raise_errors(code: str, ws, logger, allow_pickle: bool =
 
 
 def _create_kernel_http(crate_kernel_endpoint: str, logger, headers: Optional[dict] = None) -> str:
+    # [FUNCTION DOC]
+    # HELPER: POSTs to a Jupyter kernels endpoint to start a new kernel and returns its id from the JSON
+    #   response.
+    # Inputs: crate_kernel_endpoint (str URL, including token query), logger, headers (optional dict of HTTP
+    #   headers).
+    # Outputs: kernel id (str).
+    # Exceptions: RuntimeError with status and body if the status is not 201; requests/JSON errors propagate.
+    # Side effects: HTTP request; on failure logs request/response details (including request headers) via
+    #   log_error.
+    # KNOWN ISSUE: parameter name is misspelled ('crate' for 'create'); failure log may leak auth
+    #   headers/tokens.
     """Create kernel using http."""
 
     r = requests.post(crate_kernel_endpoint, headers=headers)
@@ -549,6 +772,15 @@ def _create_kernel_http(crate_kernel_endpoint: str, logger, headers: Optional[di
 
 
 class DockerExecutor(RemotePythonExecutor):
+    # [CLASS DOC]
+    # Remote executor that runs a Jupyter Kernel Gateway inside a local Docker container and talks to it over
+    #   HTTP and websockets.
+    # Inputs (constructor): additional_imports, logger, allow_pickle, host (str, default 127.0.0.1), port
+    #   (int, default 8888), image_name (str, default 'jupyter-kernel'), build_new_image (bool, default True),
+    #   container_run_kwargs (optional dict), dockerfile_content (optional str, default python:3.12 image with
+    #   kernel gateway).
+    # Key attributes: host, port, image_name, dockerfile_content, client (docker client), container, base_url,
+    #   kernel_id, ws_url.
     """
     Remote Python code executor using Jupyter Kernel Gateway in a Docker container.
 
@@ -581,6 +813,21 @@ class DockerExecutor(RemotePythonExecutor):
         container_run_kwargs: dict[str, Any] | None = None,
         dockerfile_content: str | None = None,
     ):
+        # [FUNCTION DOC]
+        # Imports docker, stores settings and Dockerfile content, connects to the Docker daemon, uses an
+        #   existing image if build_new_image is False and it exists (otherwise builds from the Dockerfile,
+        #   logging build stream at DEBUG), then runs a detached container with user kwargs plus port mapping
+        #   8888/tcp to (host, port) and a random KG_AUTH_TOKEN env var (list-form environment is converted to
+        #   a dict). Waits up to 5 seconds for running status, waits for the gateway, creates a kernel, builds
+        #   the ws URL with the token, and installs additional_imports.
+        # Inputs: see class doc.
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if docker is missing; RuntimeError if the daemon is unreachable; any
+        #   failure during build/start/kernel creation triggers cleanup and is re-raised as RuntimeError.
+        # Side effects: builds images, starts a container, network calls, sleeps, logging; mutates the user's
+        #   container_run_kwargs ports dict if one was provided (shallow copy only).
+        # KNOWN ISSUE: if the container never reaches running state, or the server never becomes ready,
+        #   initialization continues anyway and only fails later at kernel creation.
         super().__init__(additional_imports, logger, allow_pickle)
         try:
             import docker
@@ -677,6 +924,13 @@ class DockerExecutor(RemotePythonExecutor):
             raise RuntimeError(f"Failed to initialize Jupyter kernel: {e}") from e
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Opens a new websocket to ws_url per call (closed afterwards) and delegates to
+        #   _websocket_run_code_raise_errors.
+        # Inputs: code (str, Python source to run).
+        # Outputs: CodeOutput.
+        # Exceptions: AgentError, connection and serialization errors propagate.
+        # Side effects: network I/O, logging.
         """
         Execute Python code in the Docker container and return the result.
 
@@ -692,6 +946,11 @@ class DockerExecutor(RemotePythonExecutor):
             return _websocket_run_code_raise_errors(code, ws, self.logger, self.allow_pickle)
 
     def cleanup(self):
+        # [FUNCTION DOC]
+        # If a container attribute exists, stops and removes the container, logs, and deletes the attribute.
+        # Inputs: none. Outputs: none.
+        # Exceptions: none; errors are caught and logged with log_error.
+        # Side effects: Docker container stop/remove, logging.
         """Clean up the Docker container and resources."""
         try:
             if hasattr(self, "container"):
@@ -704,10 +963,21 @@ class DockerExecutor(RemotePythonExecutor):
             self.logger.log_error(f"Error during cleanup: {e}")
 
     def delete(self):
+        # [FUNCTION DOC]
+        # Alias that calls cleanup.
+        # Inputs: none. Outputs: none. Exceptions: none raised directly. Side effects: those of cleanup.
         """Ensure cleanup on deletion."""
         self.cleanup()
 
     def _wait_for_server(self, token: str):
+        # [FUNCTION DOC]
+        # HELPER: Polls the gateway kernelspecs endpoint (2 second timeout) up to 10 times, sleeping 1 second
+        #   between failed attempts, until it returns status 200.
+        # Inputs: token (str auth token).
+        # Outputs: none.
+        # Exceptions: none raised directly (request exceptions are caught).
+        # Side effects: HTTP requests, sleeping, logging.
+        # KNOWN ISSUE: gives up silently after 10 tries without raising.
         retries = 0
         jupyter_ready = False
         while not jupyter_ready and retries < 10:
@@ -724,6 +994,13 @@ class DockerExecutor(RemotePythonExecutor):
 
 
 class ModalExecutor(RemotePythonExecutor):
+    # [CLASS DOC]
+    # Remote executor that runs a Jupyter Kernel Gateway inside a Modal sandbox reached via an encrypted
+    #   tunnel.
+    # Inputs (constructor): additional_imports, logger, allow_pickle, app_name (str, default 'smolagent-
+    #   executor'), port (int, default 8888), create_kwargs (optional dict passed to modal.Sandbox.create,
+    #   overriding defaults).
+    # Key attributes: _ANSI_ESCAPE (compiled regex for ANSI escape sequences), port, sandbox, ws_url.
     """
     Remote Python code executor in a Modal sandbox.
 
@@ -754,6 +1031,19 @@ class ModalExecutor(RemotePythonExecutor):
         port: int = 8888,
         create_kwargs: Optional[dict] = None,
     ):
+        # [FUNCTION DOC]
+        # Imports modal and builds sandbox create kwargs: default image (debian slim with kernel gateway and
+        #   ipykernel) and 5 minute timeout overridden by user kwargs; looks up/creates the app by name unless
+        #   one is given; appends port to encrypted_ports; appends a secret with a random KG_AUTH_TOKEN to
+        #   secrets. Creates the sandbox running the gateway on the port, waits for the tunnel host, creates a
+        #   kernel via HTTPS, sets a wss URL and installs packages.
+        # Inputs: see class doc.
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if modal missing; RuntimeError from waiting or kernel creation;
+        #   modal errors propagate.
+        # Side effects: creates a remote sandbox/app, network calls, logging.
+        # KNOWN ISSUE: unlike Docker/Blaxel, no cleanup is attempted if initialization fails after sandbox
+        #   creation.
         super().__init__(additional_imports, logger, allow_pickle)
         self.port = port
         try:
@@ -811,6 +1101,12 @@ class ModalExecutor(RemotePythonExecutor):
         self.installed_packages = self.install_packages(additional_imports)
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Opens a websocket to ws_url per call and delegates to _websocket_run_code_raise_errors.
+        # Inputs: code (str, Python source to run).
+        # Outputs: CodeOutput.
+        # Exceptions: AgentError, connection and serialization errors propagate.
+        # Side effects: network I/O, logging.
         """
         Execute Python code in the Modal sandbox and return the result.
 
@@ -826,15 +1122,31 @@ class ModalExecutor(RemotePythonExecutor):
             return _websocket_run_code_raise_errors(code, ws, self.logger, self.allow_pickle)
 
     def cleanup(self):
+        # [FUNCTION DOC]
+        # Terminates the sandbox if the sandbox attribute exists.
+        # Inputs: none. Outputs: none. Exceptions: modal errors propagate. Side effects: remote sandbox
+        #   termination.
         """Clean up the Modal sandbox by terminating it."""
         if hasattr(self, "sandbox"):
             self.sandbox.terminate()
 
     def delete(self):
+        # [FUNCTION DOC]
+        # Alias that calls cleanup.
+        # Inputs: none. Outputs: none. Exceptions: those of cleanup. Side effects: those of cleanup.
         """Ensure cleanup on deletion."""
         self.cleanup()
 
     def _wait_for_server(self, host: str, token: str):
+        # [FUNCTION DOC]
+        # HELPER: Polls the HTTPS kernelspecs endpoint on the tunnel host until status 200. On request
+        #   exceptions counts retries, logs every 10th, sleeps 1 second, and raises after more than 60.
+        # Inputs: host (str), token (str).
+        # Outputs: none.
+        # Exceptions: RuntimeError when retries exceed 60.
+        # Side effects: HTTP requests, sleeping, logging.
+        # KNOWN ISSUE: a non-200 response without an exception neither sleeps nor counts, causing an unbounded
+        #   busy loop; requests have no timeout.
         """Wait for server to start up."""
         n_retries = 0
         while True:
@@ -852,11 +1164,23 @@ class ModalExecutor(RemotePythonExecutor):
 
     @classmethod
     def _strip_ansi_colors(cls, text: str) -> str:
+        # [FUNCTION DOC]
+        # HELPER: Class method removing ANSI escape sequences from text using _ANSI_ESCAPE.
+        # Inputs: text (str). Outputs: cleaned str. Exceptions: none raised directly. Side effects: none.
+        # KNOWN ISSUE: not used anywhere in this module.
         """Remove ansi colors from text."""
         return cls._ANSI_ESCAPE.sub("", text)
 
 
 class BlaxelExecutor(RemotePythonExecutor):
+    # [CLASS DOC]
+    # Remote executor backed by a Blaxel sandbox running a Jupyter server, reached over HTTP/websockets with
+    #   Blaxel auth headers.
+    # Inputs (constructor): additional_imports, logger, allow_pickle, sandbox_name (optional str), image (str,
+    #   default 'blaxel/jupyter-notebook'), memory (int MB, default 4096), ttl (optional str), region
+    #   (optional str).
+    # Key attributes: sandbox_name, image, memory, region, port (fixed 8888), _cleaned_up flag, sandbox,
+    #   ws_url.
     """
     Remote Python code executor in a Blaxel sandbox.
 
@@ -890,6 +1214,20 @@ class BlaxelExecutor(RemotePythonExecutor):
         ttl: str | None = None,
         region: Optional[str] = None,
     ):
+        # [FUNCTION DOC]
+        # Verifies blaxel is importable, sets sandbox_name (given or 'smolagent-executor-' plus 8 random hex
+        #   chars), builds a sandbox config (name, image, memory, port 8888, optional region and ttl), creates
+        #   the sandbox, creates a kernel via HTTP at the sandbox URL's port path using Blaxel headers,
+        #   derives ws/wss URL from the sandbox URL and installs packages.
+        # Inputs: see class doc.
+        # Outputs: none.
+        # Exceptions: ModuleNotFoundError if blaxel missing; any later failure triggers cleanup and is re-
+        #   raised as RuntimeError.
+        # Side effects: creates a remote sandbox, network calls, logging.
+        # KNOWN ISSUE: the docstring says sandbox_name defaults to 'smolagent-executor' but a random suffix is
+        #   added; ttl is documented as seconds but typed str; the token is put in the kernel URL but never
+        #   set as KG_AUTH_TOKEN in the sandbox. If the blaxel import fails, _cleaned_up is never set so
+        #   __del__ cleanup errors (silently).
         super().__init__(additional_imports, logger, allow_pickle=allow_pickle)
 
         try:
@@ -952,6 +1290,14 @@ class BlaxelExecutor(RemotePythonExecutor):
 
     @staticmethod
     def _create_sandbox(config):
+        # [FUNCTION DOC]
+        # HELPER: Static method calling Blaxel's synchronous create_sandbox API with the config and wrapping
+        #   the response in a SandboxInstance.
+        # Inputs: config (dict sandbox spec).
+        # Outputs: SandboxInstance.
+        # Exceptions: Blaxel API errors propagate.
+        # Side effects: network call creating a sandbox.
+        # KNOWN ISSUE: docstring says asynchronous but the call is synchronous.
         """Helper method to create sandbox asynchronously."""
         from blaxel.core import SandboxInstance
         from blaxel.core.client import client
@@ -961,6 +1307,13 @@ class BlaxelExecutor(RemotePythonExecutor):
         return SandboxInstance(response)
 
     def run_code_raise_errors(self, code: str) -> CodeOutput:
+        # [FUNCTION DOC]
+        # Builds 'Key: value' header strings from Blaxel settings headers, opens a websocket to ws_url with
+        #   them and delegates to _websocket_run_code_raise_errors.
+        # Inputs: code (str, Python source to run).
+        # Outputs: CodeOutput.
+        # Exceptions: AgentError, connection and serialization errors propagate.
+        # Side effects: network I/O, logging.
         """
         Execute Python code in the Blaxel sandbox and return the result.
 
@@ -980,6 +1333,17 @@ class BlaxelExecutor(RemotePythonExecutor):
             return _websocket_run_code_raise_errors(code, ws, self.logger, self.allow_pickle)
 
     def install_packages(self, additional_imports: list[str]) -> list[str]:
+        # [FUNCTION DOC]
+        # Overrides base install: returns empty list for no packages; otherwise configures the Blaxel sandbox
+        #   client with sandbox URL and headers, starts a process named 'install-packages' running pip
+        #   install, then polls it every second (up to 600 seconds) until not running.
+        # Inputs: additional_imports (list of str).
+        # Outputs: the input list on exit code 0; empty list on non-zero exit or any error.
+        # Exceptions: none; all exceptions (including timeout and error responses) are caught and logged.
+        # Side effects: remote process execution, mutates the shared Blaxel sandbox client configuration,
+        #   sleeping, logging.
+        # KNOWN ISSUE: docstring says asynchronous but it is synchronous; a fixed process name may collide on
+        #   repeated installs; exit_code None is treated as failure.
         """Helper method to install packages asynchronously."""
         if not additional_imports:
             return []
@@ -1039,6 +1403,13 @@ class BlaxelExecutor(RemotePythonExecutor):
             return []
 
     def _delete_sandbox(self):
+        # [FUNCTION DOC]
+        # HELPER: Requests deletion of the sandbox by name via Blaxel's synchronous delete API.
+        # Inputs: none (uses sandbox_name).
+        # Outputs: none.
+        # Exceptions: Blaxel API errors propagate.
+        # Side effects: network call, logging.
+        # KNOWN ISSUE: docstring says it waits for completion, but it only issues the request.
         """Delete sandbox using Blaxel's sync API and wait for completion."""
         from blaxel.core.client import client
         from blaxel.core.client.api.compute import delete_sandbox
@@ -1047,6 +1418,14 @@ class BlaxelExecutor(RemotePythonExecutor):
         delete_sandbox.sync(client=client, sandbox_name=self.sandbox_name)
 
     def cleanup(self):
+        # [FUNCTION DOC]
+        # Idempotent cleanup: returns immediately if already cleaned up; otherwise marks cleaned up, tries to
+        #   delete the sandbox (errors logged at INFO), and always removes the sandbox attribute and logs
+        #   completion.
+        # Inputs: none. Outputs: none.
+        # Exceptions: AttributeError if _cleaned_up was never set (e.g. init failed early); otherwise none.
+        # Side effects: remote deletion, logging, sets _cleaned_up, removes self.sandbox.
+        # KNOWN ISSUE: error log message contains a doubled colon.
         """Sync wrapper to clean up sandbox and resources."""
         # Prevent double cleanup
         if self._cleaned_up:
@@ -1065,10 +1444,17 @@ class BlaxelExecutor(RemotePythonExecutor):
             self.logger.log("Sandbox cleanup completed", level=LogLevel.INFO)
 
     def delete(self):
+        # [FUNCTION DOC]
+        # Alias that calls cleanup.
+        # Inputs: none. Outputs: none. Exceptions: those of cleanup. Side effects: those of cleanup.
         """Ensure cleanup on deletion."""
         self.cleanup()
 
     def __del__(self):
+        # [FUNCTION DOC]
+        # Finalizer that calls cleanup and silently ignores any exception.
+        # Inputs: none. Outputs: none. Exceptions: none. Side effects: may delete the remote sandbox at
+        #   garbage collection.
         """Ensure cleanup on deletion."""
         try:
             self.cleanup()
