@@ -12,6 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# [MODULE DOC]
+# Module: pytest suite for smolagents.models: Model base-class kwarg preparation, stream delta agglomeration,
+#   ChatMessage helpers, message cleaning, stop-sequence handling, tool-call parsing and per-backend model
+#   classes (InferenceClient, LiteLLM, LiteLLM router, OpenAI, Azure OpenAI, Bedrock, Transformers, MLX).
+# Depends on: pytest, unittest.mock, huggingface_hub, smolagents models/tools/default_tools, the
+#   require_run_all marker, conftest fixtures (example_tool, shared_datadir); some tests need openai, litellm,
+#   transformers, mlx.
+# Exports: test classes and functions only.
+# Side effects: most tests are mocked; some download models or call real APIs (MLX on macOS, transformers, and
+#   require_run_all tests).
 import json
 import sys
 from contextlib import ExitStack
@@ -47,7 +57,22 @@ from .utils.markers import require_run_all
 
 
 class TestModel:
+    # [CLASS DOC]
+    # Description: Tests for the generic Model base class and shared helpers (kwarg preparation, stream
+    #   deltas, tool schemas, ChatMessage, local MLX/Transformers models, parse_json_if_needed).
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     def test_prepare_completion_kwargs_parameter_precedence(self):
+        # [FUNCTION DOC]
+        # Description: Checks that constructor kwargs override call kwargs in _prepare_completion_kwargs
+        #   (max_tokens 100 beats 50, temperature kept, extra top_p kept) and that REMOVE_PARAMETER in
+        #   constructor kwargs removes max_tokens entirely.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         """Test that self.kwargs have highest precedence and REMOVE_PARAMETER works correctly"""
         from smolagents.models import REMOVE_PARAMETER
 
@@ -78,6 +103,14 @@ class TestModel:
         assert completion_kwargs["top_p"] == 0.8
 
     def test_agglomerate_stream_deltas(self):
+        # [FUNCTION DOC]
+        # Description: Feeds four ChatMessageStreamDelta objects (text pieces, partial tool-call argument
+        #   fragments, a final token usage) to agglomerate_stream_deltas and checks concatenated content,
+        #   concatenated tool-call arguments and total tokens 1372.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         from smolagents.models import (
             ChatMessageStreamDelta,
             ChatMessageToolCallFunction,
@@ -152,6 +185,13 @@ class TestModel:
         ],
     )
     def test_prepare_completion_kwargs_stop_sequences(self, model_id, stop_sequences, should_contain_stop):
+        # [FUNCTION DOC]
+        # Description: Parametrized: verifies the stop parameter is included only for models supporting it
+        #   (excluded for o3/o4-mini, with or without path prefixes) and only when stop_sequences is not None.
+        # Inputs: self; model_id (str), stop_sequences (list of str or None), should_contain_stop (bool).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         model = Model()
         model.model_id = model_id
         completion_kwargs = model._prepare_completion_kwargs(
@@ -192,6 +232,15 @@ class TestModel:
         ],
     )
     def test_prepare_completion_kwargs_tool_choice(self, with_tools, tool_choice, expected_result, example_tool):
+        # [FUNCTION DOC]
+        # Description: Parametrized: verifies tool_choice handling: defaults to 'required' when tools are
+        #   given and tool_choice is omitted (Ellipsis sentinel), passes through explicit strings/dicts, omits
+        #   it when None or when there are no tools.
+        # Inputs: self; with_tools (bool), tool_choice (str, dict, None or Ellipsis meaning 'not passed'),
+        #   expected_result (dict with has_tool_choice and value), example_tool (conftest fixture).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         model = Model()
         kwargs = {"messages": [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello"}])]}
         if with_tools:
@@ -208,8 +257,22 @@ class TestModel:
             assert "tool_choice" not in completion_kwargs
 
     def test_get_json_schema_has_nullable_args(self):
+        # [FUNCTION DOC]
+        # Description: Defines a @tool with an optional celsius argument and checks get_tool_json_schema marks
+        #   it nullable.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         @tool
         def get_weather(location: str, celsius: bool | None = False) -> str:
+            # [FUNCTION DOC]
+            # Description: HELPER: dummy tool body used only for schema generation; always returns a fixed
+            #   weather string.
+            # Inputs: location (str), celsius (bool or None, default False); both ignored.
+            # Outputs: constant string.
+            # Exceptions: none raised directly.
+            # Side effects: none
             """
             Get weather in the next days at given location.
             Secretly this tool does not care about the location, it hates the weather everywhere.
@@ -223,11 +286,25 @@ class TestModel:
         assert "nullable" in get_tool_json_schema(get_weather)["function"]["parameters"]["properties"]["celsius"]
 
     def test_chatmessage_has_model_dumps_json(self):
+        # [FUNCTION DOC]
+        # Description: Checks ChatMessage.model_dump_json produces JSON whose content equals the original
+        #   content list.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         message = ChatMessage("user", [{"type": "text", "text": "Hello!"}])
         data = json.loads(message.model_dump_json())
         assert data["content"] == [{"type": "text", "text": "Hello!"}]
 
     def test_chatmessage_from_dict_role_conversion(self):
+        # [FUNCTION DOC]
+        # Description: Checks ChatMessage.from_dict converts a role string, or an existing MessageRole, into a
+        #   MessageRole enum.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         message_data = {
             "role": "user",
             "content": [{"type": "text", "text": "Hello!"}],
@@ -245,6 +322,13 @@ class TestModel:
 
     @pytest.mark.skipif(not sys.platform.startswith("darwin"), reason="requires macOS")
     def test_get_mlx_message_no_tool(self):
+        # [FUNCTION DOC]
+        # Description: macOS only: runs a real MLXModel (SmolLM2-135M) and checks the output starts with
+        #   'Hello'.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: downloads model weights from the Hugging Face Hub (network, disk cache).
         model = MLXModel(model_id="HuggingFaceTB/SmolLM2-135M-Instruct", max_tokens=10)
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}])]
         output = model(messages, stop_sequences=["great"]).content
@@ -252,6 +336,14 @@ class TestModel:
 
     @pytest.mark.skipif(not sys.platform.startswith("darwin"), reason="requires macOS")
     def test_get_mlx_message_tricky_stop_sequence(self):
+        # [FUNCTION DOC]
+        # Description: macOS only: checks MLXModel trims stop sequences even when the stop text is followed by
+        #   extra characters within the same token; asserts exact model outputs with and without the stop
+        #   sequence.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: downloads model weights from the Hugging Face Hub (network, disk cache).
         # In this test HuggingFaceTB/SmolLM2-135M-Instruct generates the token ">'"
         # which is required to test capturing stop_sequences that have extra chars at the end.
         model = MLXModel(model_id="HuggingFaceTB/SmolLM2-135M-Instruct", max_tokens=100)
@@ -266,6 +358,15 @@ class TestModel:
         assert model(messages, stop_sequences=[stop_sequence]).content == "I'm ready to help you"
 
     def test_transformers_message_no_tool(self, monkeypatch):
+        # [FUNCTION DOC]
+        # Description: Runs a real TransformersModel (SmolLM2-135M, CPU, greedy, 5 tokens) and checks generate
+        #   and generate_stream both yield exactly "Hello! I'm here".
+        # Inputs: self; monkeypatch (pytest fixture, used to raise HF download timeout to 30s).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: downloads model weights from the Hugging Face Hub (network, disk cache). Patches the
+        #   HF download timeout constant for the test.
+        # KNOWN ISSUE: not guarded by require_run_all despite requiring network and model download.
         monkeypatch.setattr("huggingface_hub.constants.HF_HUB_DOWNLOAD_TIMEOUT", 30)  # instead of 10
         model = TransformersModel(
             model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -284,6 +385,16 @@ class TestModel:
         assert output_str == "Hello! I'm here"
 
     def test_transformers_message_vl_no_tool(self, shared_datadir, monkeypatch):
+        # [FUNCTION DOC]
+        # Description: Runs a real vision-language TransformersModel (llava-interleave-qwen-0.5b) on a test
+        #   image and checks generate and generate_stream outputs equal 'I am a very'.
+        # Inputs: self; shared_datadir (fixture path to test data), monkeypatch (fixture).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: downloads model weights from the Hugging Face Hub (network, disk cache). Reads a PNG
+        #   from the test data dir.
+        # KNOWN ISSUE: the expected output is flagged in the code as a possible regression (#1416); test needs
+        #   network but is not guarded by require_run_all.
         monkeypatch.setattr("huggingface_hub.constants.HF_HUB_DOWNLOAD_TIMEOUT", 30)  # instead of 10
         import PIL.Image
 
@@ -310,6 +421,13 @@ class TestModel:
         assert output_str == "I am a very"  # TODO: Investigate possible regression; see #1416
 
     def test_parse_json_if_needed(self):
+        # [FUNCTION DOC]
+        # Description: Checks parse_json_if_needed returns non-JSON strings unchanged, parses JSON strings
+        #   (object, number), and returns non-strings unchanged.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         args = "abc"
         parsed_args = parse_json_if_needed(args)
         assert parsed_args == "abc"
@@ -328,7 +446,20 @@ class TestModel:
 
 
 class TestInferenceClientModel:
+    # [CLASS DOC]
+    # Description: Tests for InferenceClientModel construction and generation (mostly mocked).
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     def test_call_with_custom_role_conversions(self):
+        # [FUNCTION DOC]
+        # Description: With a mocked client, checks that custom_role_conversions (user to system) are applied
+        #   to messages sent to chat_completion.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: replaces the model's client attribute with a MagicMock.
         custom_role_conversions = {MessageRole.USER: MessageRole.SYSTEM}
         model = InferenceClientModel(model_id="test-model", custom_role_conversions=custom_role_conversions)
         model.client = MagicMock()
@@ -342,6 +473,14 @@ class TestInferenceClientModel:
         )
 
     def test_init_model_with_tokens(self):
+        # [FUNCTION DOC]
+        # Description: Checks token and api_key both set the client token and that passing both raises
+        #   ValueError.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: expects ValueError internally via pytest.raises; otherwise none raised directly; failed
+        #   assertions raise AssertionError.
+        # Side effects: none
         model = InferenceClientModel(model_id="test-model", token="abc")
         assert model.client.token == "abc"
 
@@ -352,6 +491,14 @@ class TestInferenceClientModel:
             InferenceClientModel(model_id="test-model", token="abc", api_key="def")
 
     def test_structured_outputs_with_unsupported_provider(self):
+        # [FUNCTION DOC]
+        # Description: Checks generate with response_format raises ValueError for a provider not supporting
+        #   structured outputs.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: expects ValueError via pytest.raises; none raised directly; failed assertions raise
+        #   AssertionError.
+        # Side effects: none
         with pytest.raises(
             ValueError, match="InferenceClientModel only supports structured outputs with these providers:"
         ):
@@ -363,18 +510,38 @@ class TestInferenceClientModel:
 
     @require_run_all
     def test_get_hfapi_message_no_tool(self):
+        # [FUNCTION DOC]
+        # Description: Integration (require_run_all): real call to Qwen2.5-Coder-32B via HF inference; only
+        #   checks no exception.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: network call to Hugging Face inference API.
         model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct", max_tokens=10)
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}])]
         model(messages, stop_sequences=["great"])
 
     @require_run_all
     def test_get_hfapi_message_no_tool_external_provider(self):
+        # [FUNCTION DOC]
+        # Description: Integration (require_run_all): same as above via the 'together' provider.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: network call.
         model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct", provider="together", max_tokens=10)
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}])]
         model(messages, stop_sequences=["great"])
 
     @require_run_all
     def test_get_hfapi_message_stream_no_tool(self):
+        # [FUNCTION DOC]
+        # Description: Integration (require_run_all): streams from the HF API and checks every delta has non-
+        #   None content.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: network call.
         model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct", max_tokens=10)
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}])]
         for el in model.generate_stream(messages, stop_sequences=["great"]):
@@ -382,6 +549,13 @@ class TestInferenceClientModel:
 
     @require_run_all
     def test_get_hfapi_message_stream_no_tool_external_provider(self):
+        # [FUNCTION DOC]
+        # Description: Integration (require_run_all): streaming via the 'together' provider; checks deltas
+        #   have content.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: network call.
         model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct", provider="together", max_tokens=10)
         messages = [ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}])]
         for el in model.generate_stream(messages, stop_sequences=["great"]):
@@ -389,6 +563,12 @@ class TestInferenceClientModel:
 
 
 class TestLiteLLMModel:
+    # [CLASS DOC]
+    # Description: Tests for LiteLLMModel error handling, retries and flatten option.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     @pytest.mark.parametrize(
         "model_id",
         [
@@ -398,6 +578,17 @@ class TestLiteLLMModel:
         ],
     )
     def test_call_different_providers_without_key(self, model_id):
+        # [FUNCTION DOC]
+        # Description: Parametrized over providers: without API keys, generate and generate_stream must raise
+        #   an exception whose text contains one of several authentication-related phrases.
+        # Inputs: self; model_id (str, provider-prefixed model).
+        # Outputs: None (pytest test).
+        # Exceptions: expects exceptions via pytest.raises; none raised directly; failed assertions raise
+        #   AssertionError.
+        # Side effects: may attempt network calls to provider endpoints; depends on env vars not containing
+        #   keys.
+        # KNOWN ISSUE: the message is taken from str() of the ExceptionInfo rather than of the exception
+        #   value, which works only because its repr includes the message.
         # Different litellm versions produce different error messages for missing API keys
         # This test checks for the presence of any common authentication-related error phrases
         possible_error_messages = [
@@ -428,6 +619,16 @@ class TestLiteLLMModel:
         )
 
     def test_retry_on_rate_limit_error(self):
+        # [FUNCTION DOC]
+        # Description: With RETRY_WAIT patched to 0.1, jitter random patched to 0.1 and a mocked litellm
+        #   client failing twice with a 429 error then succeeding, checks three completion calls, correct
+        #   content and token usage, and total elapsed time between 0.67 and 0.73 seconds.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches module globals and sleeps for real (~0.7s).
+        # KNOWN ISSUE: timing-based assertion can be flaky on slow machines; the comment says RETRY_WAIT is
+        #   patched to 1 second but the value is 0.1.
         """Test that the retry mechanism does trigger on 429 rate limit errors"""
         import time
 
@@ -476,6 +677,13 @@ class TestLiteLLMModel:
             assert 0.67 <= elapsed_time <= 0.73
 
     def test_passing_flatten_messages(self):
+        # [FUNCTION DOC]
+        # Description: Checks an explicit flatten_messages_as_text argument overrides provider-based defaults
+        #   (False for groq, True for fal).
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         model = LiteLLMModel(model_id="groq/llama-3.3-70b", flatten_messages_as_text=False)
         assert not model.flatten_messages_as_text
 
@@ -484,6 +692,12 @@ class TestLiteLLMModel:
 
 
 class TestLiteLLMRouterModel:
+    # [CLASS DOC]
+    # Description: Tests for LiteLLMRouterModel.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     @pytest.mark.parametrize(
         "model_id, expected",
         [
@@ -493,6 +707,12 @@ class TestLiteLLMRouterModel:
         ],
     )
     def test_flatten_messages_as_text(self, model_id, expected):
+        # [FUNCTION DOC]
+        # Description: Parametrized: checks the explicit flatten_messages_as_text value is stored as-is.
+        # Inputs: self; model_id (str, router group name), expected (bool, passed in and expected back).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         model_list = [
             {"model_name": "llama-3.3-70b", "litellm_params": {"model": "groq/llama-3.3-70b"}},
             {"model_name": "llama-3.3-70b", "litellm_params": {"model": "cerebras/llama-3.3-70b"}},
@@ -502,6 +722,13 @@ class TestLiteLLMRouterModel:
         assert model.flatten_messages_as_text is expected
 
     def test_create_client(self):
+        # [FUNCTION DOC]
+        # Description: Patches litellm Router and checks it is constructed once with the model_list and
+        #   client_kwargs (routing_strategy) and becomes model.client.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches litellm.router.Router during the test.
         model_list = [
             {"model_name": "llama-3.3-70b", "litellm_params": {"model": "groq/llama-3.3-70b"}},
             {"model_name": "llama-3.3-70b", "litellm_params": {"model": "cerebras/llama-3.3-70b"}},
@@ -519,7 +746,20 @@ class TestLiteLLMRouterModel:
 
 
 class TestOpenAIModel:
+    # [CLASS DOC]
+    # Description: Tests for OpenAIModel client creation, streaming tool calls and stop-sequence trimming.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     def test_client_kwargs_passed_correctly(self):
+        # [FUNCTION DOC]
+        # Description: Patches openai.OpenAI and checks it is called with base_url, api_key, organization,
+        #   project and merged client_kwargs, and the instance becomes model.client.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches openai.OpenAI.
         model_id = "gpt-3.5-turbo"
         api_base = "https://api.openai.com/v1"
         api_key = "test_api_key"
@@ -543,6 +783,14 @@ class TestOpenAIModel:
 
     @require_run_all
     def test_streaming_tool_calls(self):
+        # [FUNCTION DOC]
+        # Description: Integration (require_run_all): streams from gpt-4o-mini asking for two parallel
+        #   final_answer calls and checks the accumulated arguments of both calls.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: real OpenAI API call (needs OPENAI_API_KEY).
+        # KNOWN ISSUE: args/args2 are unbound (NameError) if the model never emits tool calls or only one.
         model = OpenAIModel(model_id="gpt-4o-mini")
         messages = [
             ChatMessage(
@@ -566,6 +814,13 @@ class TestOpenAIModel:
         assert args2 == '{"answer": "blob2"}'
 
     def test_stop_sequence_cutting_for_o4_mini(self):
+        # [FUNCTION DOC]
+        # Description: With a mocked OpenAI client returning text containing '<STOP>', checks that for o4-mini
+        #   (no stop parameter support) the content is truncated client-side at the stop sequence.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches openai.OpenAI.
         """Test that stop sequences are cut a posteriori for models that don't support stop parameter"""
         # Create a mock response that contains a stop sequence in the middle
         mock_response = MagicMock()
@@ -592,7 +847,19 @@ class TestOpenAIModel:
 
 
 class TestAmazonBedrockModel:
+    # [CLASS DOC]
+    # Description: Tests for AmazonBedrockModel client creation.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     def test_client_for_bedrock(self):
+        # [FUNCTION DOC]
+        # Description: Patches boto3.client and checks the model's client is the patched return value.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches boto3.client.
         model_id = "us.amazon.nova-pro-v1:0"
 
         with patch("boto3.client") as MockBoto3:
@@ -604,7 +871,21 @@ class TestAmazonBedrockModel:
 
 
 class TestAzureOpenAIModel:
+    # [CLASS DOC]
+    # Description: Tests for AzureOpenAIModel client creation.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     def test_client_kwargs_passed_correctly(self):
+        # [FUNCTION DOC]
+        # Description: Patches openai.OpenAI and openai.AzureOpenAI; checks only AzureOpenAI is constructed,
+        #   with base_url None plus api_key, api_version, azure_endpoint, organization, project and
+        #   client_kwargs, and it becomes model.client.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches openai classes.
         model_id = "gpt-3.5-turbo"
         api_key = "test_api_key"
         api_version = "2023-12-01-preview"
@@ -637,6 +918,12 @@ class TestAzureOpenAIModel:
 
 
 class TestTransformersModel:
+    # [CLASS DOC]
+    # Description: Tests for TransformersModel initialization paths.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: none
     @pytest.mark.parametrize(
         "patching",
         [
@@ -655,6 +942,15 @@ class TestTransformersModel:
         ],
     )
     def test_init(self, patching):
+        # [FUNCTION DOC]
+        # Description: Parametrized over two patch sets: when the image-text-to-text loader fails with
+        #   'Unrecognized configuration class' the model falls back to AutoModelForCausalLM + AutoTokenizer;
+        #   otherwise uses AutoModelForImageTextToText + AutoProcessor. Checks the loaders receive device_map,
+        #   torch_dtype and trust_remote_code correctly.
+        # Inputs: self; patching (list of (target, patch kwargs) tuples).
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: patches transformers loaders.
         with ExitStack() as stack:
             mocks = {target: stack.enter_context(patch(target, **kwargs)) for target, kwargs in patching}
             model = TransformersModel(
@@ -684,6 +980,13 @@ class TestTransformersModel:
 
 
 def test_get_clean_message_list_basic():
+    # [FUNCTION DOC]
+    # Description: Checks get_clean_message_list converts ChatMessages to dicts with string roles and
+    #   preserved content.
+    # Inputs: none.
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     messages = [
         ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}]),
         ChatMessage(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": "Hi there!"}]),
@@ -717,6 +1020,12 @@ def test_get_clean_message_list_basic():
     ],
 )
 def test_get_clean_message_list_with_dicts(messages, expected_roles, expected_texts):
+    # [FUNCTION DOC]
+    # Description: Parametrized: checks plain dict messages are accepted and roles/texts preserved.
+    # Inputs: messages (list of dicts), expected_roles (list of str), expected_texts (list of str).
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     result = get_clean_message_list(messages)
     assert len(result) == len(messages)
     for i, msg in enumerate(result):
@@ -725,6 +1034,12 @@ def test_get_clean_message_list_with_dicts(messages, expected_roles, expected_te
 
 
 def test_get_clean_message_list_role_conversions():
+    # [FUNCTION DOC]
+    # Description: Checks role_conversions map tool-call to assistant and tool-response to user.
+    # Inputs: none.
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     messages = [
         ChatMessage(role=MessageRole.TOOL_CALL, content=[{"type": "text", "text": "Calling tool..."}]),
         ChatMessage(role=MessageRole.TOOL_RESPONSE, content=[{"type": "text", "text": "Tool response"}]),
@@ -738,6 +1053,12 @@ def test_get_clean_message_list_role_conversions():
 
 
 def test_remove_content_after_stop_sequences():
+    # [FUNCTION DOC]
+    # Description: Checks content is cut at the first stop sequence.
+    # Inputs: none.
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     content = "Hello<code>world!"
     stop_sequences = ["<code>"]
     removed_content = remove_content_after_stop_sequences(content, stop_sequences)
@@ -745,6 +1066,12 @@ def test_remove_content_after_stop_sequences():
 
 
 def test_remove_content_after_stop_sequences_handles_none():
+    # [FUNCTION DOC]
+    # Description: Checks None stop sequences leave content unchanged and None content returns None.
+    # Inputs: none.
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     # Test with None stop sequence
     content = "Hello world!"
     removed_content = remove_content_after_stop_sequences(content, None)
@@ -781,6 +1108,14 @@ def test_remove_content_after_stop_sequences_handles_none():
     ],
 )
 def test_get_clean_message_list_image_encoding(convert_images_to_image_urls, expected_clean_message):
+    # [FUNCTION DOC]
+    # Description: Parametrized: with encode_image_base64 patched, checks image bytes are encoded and either
+    #   kept as image parts or converted to image_url data URIs (PNG) depending on
+    #   convert_images_to_image_urls.
+    # Inputs: convert_images_to_image_urls (bool), expected_clean_message (dict).
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: patches smolagents.models.encode_image_base64.
     message = ChatMessage(
         role=MessageRole.USER,
         content=[{"type": "image", "image": b"image_data"}, {"type": "image", "image": b"second_image_data"}],
@@ -795,6 +1130,13 @@ def test_get_clean_message_list_image_encoding(convert_images_to_image_urls, exp
 
 
 def test_get_clean_message_list_flatten_messages_as_text():
+    # [FUNCTION DOC]
+    # Description: Checks consecutive same-role messages are merged and, with flatten_messages_as_text,
+    #   content becomes a single newline-joined string.
+    # Inputs: none.
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     messages = [
         ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "Hello!"}]),
         ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "How are you?"}]),
@@ -844,6 +1186,15 @@ def test_get_clean_message_list_flatten_messages_as_text():
 def test_flatten_messages_as_text_for_all_models(
     model_class, model_kwargs, patching, expected_flatten_messages_as_text
 ):
+    # [FUNCTION DOC]
+    # Description: Parametrized over model classes with their constructors' dependencies patched: checks the
+    #   default flatten_messages_as_text value per backend/model id (e.g. True for ollama/groq/cerebras
+    #   LiteLLM, MLX and text-only Transformers; False for OpenAI/Azure/InferenceClient/VLM Transformers).
+    # Inputs: model_class (Model subclass), model_kwargs (dict), patching (None, one (target, kwargs) tuple,
+    #   or a list of them), expected_flatten_messages_as_text (bool).
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: patches client/loader constructors during model creation.
     with ExitStack() as stack:
         if isinstance(patching, list):
             for target, kwargs in patching:
@@ -909,17 +1260,45 @@ def test_flatten_messages_as_text_for_all_models(
     ],
 )
 def test_supports_stop_parameter(model_id, expected):
+    # [FUNCTION DOC]
+    # Description: Parametrized: checks supports_stop_parameter returns False for o3, o4-mini, gpt-5*,
+    #   grok-3/4 families (with optional provider prefixes and date suffixes) and True for others including
+    #   o3-mini and near-miss names.
+    # Inputs: model_id (str), expected (bool).
+    # Outputs: None (pytest test).
+    # Exceptions: none raised directly; failed assertions raise AssertionError.
+    # Side effects: none
     """Test the supports_stop_parameter function with various model IDs"""
     assert supports_stop_parameter(model_id) == expected, f"Failed for model_id: {model_id}"
 
 
 class TestGetToolCallFromText:
+    # [CLASS DOC]
+    # Description: Tests for get_tool_call_from_text parsing tool calls out of JSON text.
+    # Inputs: no constructor arguments (pytest test class).
+    # Outputs: n/a.
+    # Exceptions: n/a.
+    # Side effects: autouse fixture patches uuid.uuid4 for each test.
     @pytest.fixture(autouse=True)
     def mock_uuid4(self):
+        # [FUNCTION DOC]
+        # Description: HELPER: autouse pytest fixture that patches uuid.uuid4 to return 'test-uuid' for the
+        #   duration of each test in the class.
+        # Inputs: self.
+        # Outputs: yields None once (generator fixture).
+        # Exceptions: none raised directly.
+        # Side effects: globally patches uuid.uuid4 while active.
         with patch("uuid.uuid4", return_value="test-uuid"):
             yield
 
     def test_get_tool_call_from_text_basic(self):
+        # [FUNCTION DOC]
+        # Description: Checks a JSON tool call yields a ChatMessageToolCall with the mocked id, type
+        #   'function', name and string arguments.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"name": "weather_tool", "arguments": "New York"}'
         result = get_tool_call_from_text(text, "name", "arguments")
         assert isinstance(result, ChatMessageToolCall)
@@ -929,6 +1308,13 @@ class TestGetToolCallFromText:
         assert result.function.arguments == "New York"
 
     def test_get_tool_call_from_text_name_key_missing(self):
+        # [FUNCTION DOC]
+        # Description: Checks a missing name key raises ValueError listing the available keys.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: expects ValueError via pytest.raises; none raised directly; failed assertions raise
+        #   AssertionError.
+        # Side effects: none
         text = '{"action": "weather_tool", "arguments": "New York"}'
         with pytest.raises(ValueError) as exc_info:
             get_tool_call_from_text(text, "name", "arguments")
@@ -937,27 +1323,57 @@ class TestGetToolCallFromText:
         assert "'action', 'arguments'" in error_msg
 
     def test_get_tool_call_from_text_json_object_args(self):
+        # [FUNCTION DOC]
+        # Description: Checks object-valued arguments are returned as a dict.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"name": "weather_tool", "arguments": {"city": "New York"}}'
         result = get_tool_call_from_text(text, "name", "arguments")
         assert result.function.arguments == {"city": "New York"}
 
     def test_get_tool_call_from_text_json_string_args(self):
+        # [FUNCTION DOC]
+        # Description: Checks arguments given as a JSON-encoded string are parsed into a dict.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"name": "weather_tool", "arguments": "{\\"city\\": \\"New York\\"}"}'
         result = get_tool_call_from_text(text, "name", "arguments")
         assert result.function.arguments == {"city": "New York"}
 
     def test_get_tool_call_from_text_missing_args(self):
+        # [FUNCTION DOC]
+        # Description: Checks a missing arguments key yields None arguments.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"name": "weather_tool"}'
         result = get_tool_call_from_text(text, "name", "arguments")
         assert result.function.arguments is None
 
     def test_get_tool_call_from_text_custom_keys(self):
+        # [FUNCTION DOC]
+        # Description: Checks custom name/arguments key names are honored.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"tool": "weather_tool", "params": "New York"}'
         result = get_tool_call_from_text(text, "tool", "params")
         assert result.function.name == "weather_tool"
         assert result.function.arguments == "New York"
 
     def test_get_tool_call_from_text_numeric_args(self):
+        # [FUNCTION DOC]
+        # Description: Checks numeric arguments are returned unchanged.
+        # Inputs: self (test instance); no other inputs.
+        # Outputs: None (pytest test).
+        # Exceptions: none raised directly; failed assertions raise AssertionError.
+        # Side effects: none
         text = '{"name": "calculator", "arguments": 42}'
         result = get_tool_call_from_text(text, "name", "arguments")
         assert result.function.name == "calculator"
@@ -972,6 +1388,16 @@ class TestGetToolCallFromText:
     ],
 )
 def test_tool_calls_json_serialization(model_class, model_id):
+    # [FUNCTION DOC]
+    # Description: Parametrized over OpenAIModel and LiteLLMModel: builds a realistic provider SDK response
+    #   object (OpenAI ChatCompletion or litellm ModelResponse) containing a final_answer tool call, patches
+    #   create_client to return a mock client returning it, and checks generate produces ChatMessageToolCall
+    #   dataclasses that survive model_dump_json with correct name and arguments.
+    # Inputs: model_class (OpenAIModel or LiteLLMModel), model_id (str).
+    # Outputs: None (pytest test).
+    # Exceptions: raises ValueError for an unexpected model_class; otherwise none raised directly; failed
+    #   assertions raise AssertionError.
+    # Side effects: patches the model class's create_client.
     """Test that tool_calls from various API models (Pydantic, dataclass, dict) are properly converted to dataclasses and can be JSON serialized.
     This tests the horizontal fix that ensures all models (LiteLLM, OpenAI, InferenceClient, AmazonBedrock)
     properly convert tool_calls to dataclasses regardless of the source format (Pydantic models, dataclasses, or dicts).
